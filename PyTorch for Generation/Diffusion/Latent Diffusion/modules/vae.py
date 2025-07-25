@@ -556,8 +556,6 @@ class VAE(EncoderDecoder):
         return output
 
     def decode(self, z, scale_factor=None):
-
-        x = self.forward_dec(z)
         
         ### Unscale the Embeddings by the scale_factor ###
         if scale_factor is None:
@@ -567,7 +565,10 @@ class VAE(EncoderDecoder):
                 scale_factor = 1.0
 
         x = x / scale_factor
-        
+
+        ### Decode Latent ###
+        x = self.forward_dec(z)
+
         return x
     
     def forward(self, x):
