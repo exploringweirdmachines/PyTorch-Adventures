@@ -42,7 +42,7 @@ def ctc_loss(log_probs, targets, input_lengths, target_lengths, blank=0, reducti
     ### [F, F] + [T, F, T, F, T, F, T, F] -> [F, F, T, F, T, F, T, F, T, F]
     diff_labels = torch.cat([torch.tensor([[False, False]], device=log_probs.device).expand(batch_size, -1), \
                                 _t_a_r_g_e_t_s_[:, 2:] != _t_a_r_g_e_t_s_[:, :-2]], dim=-1)
-    print(diff_labels)
+
     ### Grab the log probability for the correct target at every timestep T ###
     ### First, expand _t_a_r_g_e_t_s_, repeating for all timesteps outputed by model logits:
 
