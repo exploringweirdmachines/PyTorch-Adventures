@@ -21,11 +21,11 @@ def ctc_loss(log_probs, targets, input_lengths, target_lengths, blank=0, reducti
     
     seq_len, batch_size, num_classes = log_probs.shape
     B = torch.arange(batch_size)
-    
+  
     ### _t_a_r_g_e_t_s_: [28, 1, 17, 21, 0] -> Append a blank token at the end (we could really use anything, doesnt matter) ###
     ### its just a placeholder so our indexing is happy, we will never use this token anywhere or include it in the loss
     _t_a_r_g_e_t_s_ = torch.cat([targets, torch.zeros(batch_size, 1, device=log_probs.device, dtype=torch.long)], dim=-1)
-
+    
     ### _t_a_r_g_e_t_s_: [0, 28, 0, 1, 0, 17, 0, 21, 0, 0] -> Insert blank tokens in between targets
     _t_a_r_g_e_t_s_ = torch.stack([torch.full_like(_t_a_r_g_e_t_s_, blank), _t_a_r_g_e_t_s_], dim=-1).flatten(start_dim=-2)
 
@@ -42,7 +42,7 @@ def ctc_loss(log_probs, targets, input_lengths, target_lengths, blank=0, reducti
     ### [F, F] + [T, F, T, F, T, F, T, F] -> [F, F, T, F, T, F, T, F, T, F]
     diff_labels = torch.cat([torch.tensor([[False, False]], device=log_probs.device).expand(batch_size, -1), \
                                 _t_a_r_g_e_t_s_[:, 2:] != _t_a_r_g_e_t_s_[:, :-2]], dim=-1)
-
+    print(diff_labels)
     ### Grab the log probability for the correct target at every timestep T ###
     ### First, expand _t_a_r_g_e_t_s_, repeating for all timesteps outputed by model logits:
 
@@ -75,13 +75,13 @@ def ctc_loss(log_probs, targets, input_lengths, target_lengths, blank=0, reducti
     ### also we add two extra indexes before our target length, so we can do the transition to the first
     ### timestep without breaking indexing 
     log_alpha = torch.full((seq_len, batch_size, 2 + _t_a_r_g_e_t_s_.shape[-1]), NEG_INF).to(log_probs.device)
-    
+
     ### Initialize our log_alpha with the initial blank token log prob at the first token after the 2 extra paddings we 
     ### added, and the token predicted after the blanks tokens log prob at the text timestep. This is our starting point 
     ### and we can use dynamic programming to iterate through all timesteps ###
     log_alpha[0, :, 2] = log_probs[0, :, blank]
     log_alpha[0, :, 2+1] = log_probs[0, B, _t_a_r_g_e_t_s_[:,1]]
-    
+    print(log_alpha.shape)
     for T_ in range(1, T):
 
         ### Compute all possible ways to reach some position s in log_alpha[t, :, s] ###
@@ -105,7 +105,7 @@ def ctc_loss(log_probs, targets, input_lengths, target_lengths, blank=0, reducti
         ### If the t two steps back is different from the current t, it is a valid transition, so this is a flag
         ### that allows those probabilities to come in (a two step transition)
         log_alpha_two_step_transition = torch.where(diff_labels, input=log_alpha[T_-1, : , :-2], other=NEG_INF)
-        
+
         ### Sum it all together! All our data is log, so we need to exponentiate to get probs, sum the probs, and log again ###
         ### Lets use torch.logsumexp to do this!
         prob = torch.logsumexp(torch.stack([log_alpha_T_prev_next, log_alpha_T_prev_stay, log_alpha_two_step_transition]), dim = 0)
