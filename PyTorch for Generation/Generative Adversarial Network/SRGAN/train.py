@@ -25,7 +25,7 @@ generator_lr = 1e-4
 discriminator_lr = 1e-4
 path_to_train_data = "/mnt/datadrive/data/ImageNet/train"
 path_to_test_data = "/mnt/datadrive/data/ImageNet/validation"
-path_to_gens = "gens/"
+path_to_gens = "work_dir/"
 device = accelerator.device
 
 ### Data Prep ###

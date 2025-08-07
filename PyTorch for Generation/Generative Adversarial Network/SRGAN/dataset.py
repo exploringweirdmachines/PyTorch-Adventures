@@ -23,10 +23,3 @@ class SRImageDataset(Dataset):
         lr_img = F.interpolate(hr_img.unsqueeze(0), size=(self.lr_size, self.lr_size)).squeeze(0)
         return hr_img, lr_img
     
-path_to_data = "/mnt/datadrive/data/ImageNet/train"
-
-dataset = SRImageDataset(path_to_data, train_transform=False)
-
-dataset = iter(dataset)
-hr, lr = next(dataset)
-hr, lr = next(dataset)
