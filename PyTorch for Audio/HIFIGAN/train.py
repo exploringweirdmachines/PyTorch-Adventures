@@ -79,7 +79,7 @@ accelerator = Accelerator(project_dir=path_to_experiment,
 
 if args.log_wandb:
     accelerator.init_trackers(args.experiment_name)
-    
+
 ### Load Model ###
 config = HIFIGANConfig(upsample_rates=args.upsample_rates, 
                        upsample_kernel_sizes=args.upsample_kernel_sizes, 
@@ -218,7 +218,7 @@ for epoch in range(completed_epochs, args.training_epochs):
         if completed_steps % args.console_out_iters == 0:
             accelerator.print(f"Completed Steps: {completed_steps} | Gen Loss: {round(total_gen_loss.item(), 4)} | Disc Loss: {round(total_disc_loss.item(), 4)} | Mel Loss: {round(loss_mel.item()/args.lambda_mel, 4)}")
 
-        if completed_epochs % args.wandb_log_iters == 0:
+        if completed_steps % args.wandb_log_iters == 0:
             
             if args.log_wandb:
                 accelerator.log(
