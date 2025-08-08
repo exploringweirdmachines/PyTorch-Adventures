@@ -97,7 +97,7 @@ class MelDataset(Dataset):
                  fmin=0, 
                  fmax=8000, 
                  fmax_loss=None,
-                 max_audio_magnitude=0.95,):
+                 max_audio_magnitude=0.95):
         
         with open(path_to_manifest, "r") as f:
             self.audio_files = [line.strip() for line in f.readlines()]
@@ -157,4 +157,4 @@ class MelDataset(Dataset):
                                            center=False, 
                                            normalized=False)
         
-        return (mel.squeeze(0), audio.squeeze(0), mel_loss.squeeze(0))
+        return (mel.squeeze(0), audio, mel_loss.squeeze(0))

@@ -124,66 +124,6 @@ class ResidualBlock(nn.Module):
             x = x + residual
 
         return x
-
-class Generator(torch.nn.Module):
-    def __init__(self, config):
-        super(Generator, self).__init__()
-        self.config = config
-        self.num_residual_blocks = len(config.residual_block_kernel_sizes)
-        self.num_upsamples = len(config.upsample_rates)
-
-        self.input_conv = weight_norm(
-            nn.Conv1d(
-                in_channels=config.num_mels, 
-                out_channels=config.upsample_initial_channel, 
-                kernel_size=7, 
-                stride=1, 
-                padding="same"
-            )
-        )
-
-        self.ups = nn.ModuleList()
-        for i, (u, k) in enumerate(zip(config.upsample_rates, config.upsample_kernel_sizes)):
-            self.ups.append(weight_norm(
-                nn.ConvTranspose1d(in_channels=config.upsample_initial_channel//(2**i),
-                                   out_channels= config.upsample_initial_channel//(2**(i+1)),
-                                   kernel_size=k,
-                                   stride=u, 
-                                   padding=(k-u)//2)))
-
-        self.resblocks = nn.ModuleList()
-        for i in range(len(self.ups)):
-            ch = config.upsample_initial_channel//(2**(i+1))
-            for j, (k, d) in enumerate(zip(config.resblock_kernel_sizes, config.resblock_dilation_sizes)):
-                self.resblocks.append(ResidualBlock(ch, k, d))
-
-        self.conv_post = weight_norm(
-            nn.Conv1d(in_channels=ch, 
-                      out_channels=1, 
-                      kernel_size=7, 
-                      stride=1,
-                      padding=3)
-        )
-        self.ups.apply(init_weights)
-        self.conv_post.apply(init_weights)
-
-    def forward(self, x):
-        x = self.conv_pre(x)
-        for i in range(self.num_upsamples):
-            x = F.leaky_relu(x, 0.1)
-            x = self.ups[i](x)
-            xs = None
-            for j in range(self.num_kernels):
-                if xs is None:
-                    xs = self.resblocks[i*self.num_kernels+j](x)
-                else:
-                    xs += self.resblocks[i*self.num_kernels+j](x)
-            x = xs / self.num_kernels
-        x = F.leaky_relu(x)
-        x = self.conv_post(x)
-        x = torch.tanh(x)
-
-        return x
     
 class Generator(nn.Module):
     def __init__(self, config):
@@ -377,11 +317,13 @@ class PeriodicDiscriminator(nn.Module):
         return x, feature_maps
 
 class MultiPeriodDiscriminator(nn.Module):
-    def __init__(self, config=None):
+    def __init__(self, config):
         super(MultiPeriodDiscriminator, self).__init__()
 
+        self.config = config
+
         self.discriminators = nn.ModuleList(
-            [PeriodicDiscriminator(p) for p in (2,3,5,7,11)]
+            [PeriodicDiscriminator(p) for p in config.mpd_periods]
         )
 
     def forward(self, real, gen):
@@ -509,18 +451,18 @@ class ScaleDiscriminator(nn.Module):
         return x, feature_maps
 
 class MultiScaleDiscriminator(nn.Module):
-    def __init__(self, config=None):
+    def __init__(self, config):
         super(MultiScaleDiscriminator, self).__init__()
 
         self.config = config
 
         self.discriminator = nn.ModuleList(
-            [ScaleDiscriminator(use_spectral_norm=True)] + [ScaleDiscriminator() for _ in range(2)]
+            [ScaleDiscriminator(use_spectral_norm=True)] + [ScaleDiscriminator() for _ in range(config.msd_num_downsamples)]
         )
 
         self.meanpools = nn.ModuleList(
             [
-                nn.AvgPool1d(kernel_size=4, stride=2, padding=2) for _ in range(2)
+                nn.AvgPool1d(kernel_size=4, stride=2, padding=2) for _ in range(config.msd_num_downsamples)
             ]
         )
 
@@ -547,49 +489,15 @@ class MultiScaleDiscriminator(nn.Module):
 
         return real_outs, gen_outs, real_feat_maps, gen_feat_maps
 
-# class HIFIGAN(nn.Module):
-#     def __init__(self, config):
-#         super(HIFIGAN, self).__init__()
-#         self.generator = Generator(config)
-#         self.mpd = MultiPeriodDiscriminator(config)
-#         self.msd = MultiScaleDiscriminator(config)
+class HIFIGAN(nn.Module):
+    def __init__(self, config):
+        super(HIFIGAN, self).__init__()
+        self.generator = Generator(config)
+        self.mpd = MultiPeriodDiscriminator(config)
+        self.msd = MultiScaleDiscriminator(config)
 
-#     def _get_generator_params(self):
-#         return self.generator.parameters()
+    def _get_generator_params(self):
+        return self.generator.parameters()
 
-#     def _get_discriminator_params(self):
-#         return list(self.mpd.parameters()) + list(self.msd.parameters())
-
-
-def feature_loss(fmap_r, fmap_g):
-    loss = 0
-    for dr, dg in zip(fmap_r, fmap_g):
-        for rl, gl in zip(dr, dg):
-            loss += torch.mean(torch.abs(rl - gl))
-
-    return loss*2
-
-
-def discriminator_loss(disc_real_outputs, disc_generated_outputs):
-    loss = 0
-    r_losses = []
-    g_losses = []
-    for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
-        r_loss = torch.mean((1-dr)**2)
-        g_loss = torch.mean(dg**2)
-        loss += (r_loss + g_loss)
-        r_losses.append(r_loss.item())
-        g_losses.append(g_loss.item())
-
-    return loss, r_losses, g_losses
-
-
-def generator_loss(disc_outputs):
-    loss = 0
-    gen_losses = []
-    for dg in disc_outputs:
-        l = torch.mean((1-dg)**2)
-        gen_losses.append(l)
-        loss += l
-
-    return loss, gen_losses
+    def _get_discriminator_params(self):
+        return list(self.mpd.parameters()) + list(self.msd.parameters())

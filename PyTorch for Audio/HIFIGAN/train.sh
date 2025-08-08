@@ -1,41 +1,13 @@
-# accelerate launch train.py \
-#     --experiment_name hifigan \
-#     --working_directory work_dir \
-#     --path_to_train_manifest train_manifest.txt \
-#     --path_to_val_manifest val_manifest.txt \
-#     --training_iterations 500000 \
-#     --evaluation_iters 100 \
-#     --checkpoint_iters 10000 \
-#     --batch_size_per_gpu 8 \
-#     --learning_rate 0.0002 \
-#     --beta1 0.8 \
-#     --beta2 0.99 \
-#     --lr_decay 0.999 \
-#     --upsample_rates 8 8 2 2 \
-#     --upsample_kernel_sizes 16 16 4 4 \
-#     --residual_block_kernel_sizes 3 7 11 \
-#     --residual_block_dilation_sizes "((1,3,5),(1,3,5),(1,3,5))" \
-#     --mpd_periods 2 3 5 7 11 \
-#     --sampling_rate 22050 \
-#     --segment_size 8192 \
-#     --num_mels 80 \
-#     --n_fft 1024 \
-#     --window_size 1024 \
-#     --hop_size 256 \
-#     --fmin 0 \
-#     --fmax 8000 \
-#     --n_cache_reuse 1 \
-#     --num_workers 16 
-
-python train.py \
-    --experiment_name hifigan \
+accelerate launch train.py \
+    --experiment_name test \
     --working_directory work_dir \
-    --path_to_train_manifest train_manifest.txt \
-    --path_to_val_manifest val_manifest.txt \
-    --training_epochs 500000 \
-    --evaluation_iters 100 \
-    --checkpoint_iters 10000 \
-    --batch_size 8 \
+    --path_to_train_manifest data/train_manifest.txt \
+    --path_to_val_manifest data/val_manifest.txt \
+    --training_epochs 3100 \
+    --console_out_iters 5 \
+    --wandb_log_iters 5 \
+    --checkpoint_epochs 50 \
+    --batch_size 16 \
     --learning_rate 0.0002 \
     --beta1 0.8 \
     --beta2 0.99 \
@@ -53,5 +25,5 @@ python train.py \
     --hop_size 256 \
     --fmin 0 \
     --fmax 8000 \
-    --n_cache_reuse 1 \
-    --num_workers 16 
+    --num_workers 16 \
+    --log_wandb
