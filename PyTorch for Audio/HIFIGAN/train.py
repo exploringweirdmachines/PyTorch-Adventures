@@ -77,6 +77,9 @@ path_to_experiment = os.path.join(args.working_directory, args.experiment_name)
 accelerator = Accelerator(project_dir=path_to_experiment,
                           log_with="wandb" if args.log_wandb else None)
 
+if args.log_wandb:
+    accelerator.init_trackers(args.experiment_name)
+    
 ### Load Model ###
 config = HIFIGANConfig(upsample_rates=args.upsample_rates, 
                        upsample_kernel_sizes=args.upsample_kernel_sizes, 
