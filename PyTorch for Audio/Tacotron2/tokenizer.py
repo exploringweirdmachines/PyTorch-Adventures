@@ -8,8 +8,9 @@ class Tokenizer:
         self.pad_token = "<PAD>"
         self.unk_token = "<UNK>"
 
-        self.chars = list('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!\'\"(),-.:;? ') + \
-            [self.eos_token, self.pad_token, self.unk_token]
+        self.chars = [self.pad_token, self.eos_token, self.unk_token] + \
+            list('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!\'\"(),-.:;? ')
+            
         
         self.char2id = {char: i for i, char in enumerate(self.chars)}
         self.id2char = {i: char for i, char in enumerate(self.chars)}
@@ -17,6 +18,7 @@ class Tokenizer:
         self.eos_token_id = self.char2id[self.eos_token]
         self.pad_token_id = self.char2id[self.pad_token]
         self.unk_token_id = self.char2id[self.unk_token]
+        self.vocab_size = len(self.chars)
         
     def encode(self, text, return_tensor=True):
 
@@ -38,3 +40,4 @@ class Tokenizer:
                 chars.append(char)
                 
         return ''.join(chars)
+    
