@@ -11,7 +11,8 @@ from accelerate import Accelerator
 import matplotlib.pyplot as plt
 
 from model import Tacotron2, Tacotron2Config
-from dataset import TTSDataset, TTSCollator, RandomBucketBatchSampler
+# from model import Tacotron2
+from dataset import TTSDataset, TTSCollator, BatchSampler, denormalize
 from tokenizer import Tokenizer
 
 def parse_args():
@@ -28,12 +29,14 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=None)
 
     ### TRAINING CONFIG ###
-    parser.add_argument("--training_epochs", type=int, default=1500)
+    parser.add_argument("--training_epochs", type=int, default=500)
     parser.add_argument("--console_out_iters", type=int, default=5)
     parser.add_argument("--wandb_log_iters", type=int, default=5)
     parser.add_argument("--checkpoint_epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=0.001)
+    parser.add_argument("--weight_decay", type=float, default=0.000001)
+    parser.add_argument("--adam_eps", type=float, default=0.000001)
     parser.add_argument("--min_learing_rate", type=float, default=0.00001)
     parser.add_argument("--start_decay_epoch", type=int, default=250)
 
@@ -85,33 +88,35 @@ tokenizer = Tokenizer()
 
 ### Load Model ###
 config = Tacotron2Config(
+    num_mels=args.num_mels,
     num_chars=tokenizer.vocab_size, 
     character_embed_dim=args.character_embed_dim,
     pad_token_id=tokenizer.pad_token_id,
-    num_mels=args.num_mels,
     encoder_kernel_size=args.encoder_kernel_size,
     encoder_n_convolutions=args.encoder_n_convolutions,
     encoder_embed_dim=args.encoder_embed_dim,
     encoder_dropout_p=args.encoder_dropout_p,
-    decoder_rnn_embed_dim=args.decoder_rnn_embed_dim,
+    decoder_embed_dim=args.decoder_rnn_embed_dim,
     decoder_prenet_dim=args.decoder_prenet_dim,
     decoder_prenet_depth=args.decoder_prenet_depth,
     decoder_prenet_dropout_p=args.decoder_prenet_dropout_p,
     decoder_postnet_num_convs=args.decoder_postnet_num_convs,
     decoder_postnet_n_filters=args.decoder_postnet_n_filters,
     decoder_postnet_kernel_size=args.decoder_postnet_kernel_size,
-    attention_rnn_embed_dim=args.attention_rnn_embed_dim,
     attention_dim=args.attention_dim,
     attention_location_n_filters=args.attention_location_n_filters,
     attention_location_kernel_size=args.attention_location_kernel_size
 )
 
-model = Tacotron2(config)
-model = nn.SyncBatchNorm.convert_sync_batchnorm(model) 
+model = Tacotron2(config) 
+total_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+accelerator.print(f"Total Trainable Parameters: {total_trainable_params}")
 
 ### Load Optimizer ###
 optimizer = torch.optim.Adam(model.parameters(), 
-                             lr=args.learning_rate)
+                             lr=args.learning_rate,
+                             eps=args.adam_eps, 
+                             weight_decay=args.weight_decay)
 
 ### Load Dataset ###
 trainset = TTSDataset(args.path_to_train_manifest, 
@@ -133,10 +138,7 @@ testset = TTSDataset(args.path_to_val_manifest,
                       num_mels=args.num_mels)
 
 collator = TTSCollator()
-train_sampler = RandomBucketBatchSampler(lengths=trainset.transcript_lengths,
-                                         batch_size=args.batch_size,
-                                         bucket_size=100,
-                                         drop_last=False)
+train_sampler = BatchSampler(trainset, batch_size=args.batch_size)
 trainloader = DataLoader(trainset, 
                          batch_sampler=train_sampler, 
                          num_workers=args.num_workers,
@@ -174,7 +176,7 @@ if args.resume_from_checkpoint is not None:
         accelerator.load_state(path_to_checkpoint)
     
     ### Start completed steps from checkpoint index ###
-    completed_epochs = int(args.resume_from_checkpoint.split("_")[-1])
+    completed_epochs = int(args.resume_from_checkpoint.split("_")[-1]) + 1
     completed_steps = completed_epochs * len(trainloader)
     accelerator.print(f"Resuming from Epoch: {completed_epochs}")
     scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda, last_epoch=completed_epochs-1)
@@ -185,7 +187,7 @@ else:
     scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 ### Train Model ###
-for epoch in range(args.training_epochs):
+for epoch in range(completed_epochs, args.training_epochs):
     
     accelerator.print(f"Epoch: {epoch}")
 
@@ -216,18 +218,31 @@ for epoch in range(args.training_epochs):
         optimizer.step()
         optimizer.zero_grad()
 
+        ### Grab Metrics from all GPUs for Logging ###
+        loss = torch.mean(accelerator.gather_for_metrics(loss)).item()
+        mel_loss = torch.mean(accelerator.gather_for_metrics(mel_loss)).item()
+        refined_mel_loss = torch.mean(accelerator.gather_for_metrics(refined_mel_loss)).item()
+        stop_loss = torch.mean(accelerator.gather_for_metrics(stop_loss)).item()
+
         if completed_steps % args.console_out_iters == 0:
-            accelerator.print(f"Completed Steps: {completed_steps}/{args.training_epochs*len(trainloader)//accelerator.num_processes} | Loss: {round(loss.item(), 4)} | Mel Loss: {round(mel_loss.item(), 4)} | RMel Loss: {round(refined_mel_loss.item(), 4)} | Stop Loss: {round(stop_loss.item(), 4)}")
+            accelerator.print("Completed Steps {}/{} | Loss {:.4f} | Mel Loss {:.4f} | RMel Loss {:.4f} | Stop Loss {:.4f}".format(
+                completed_steps, 
+                args.training_epochs * len(trainloader) // accelerator.num_processes, 
+                loss, 
+                mel_loss, 
+                refined_mel_loss, 
+                stop_loss
+            ))
        
         if completed_steps % args.wandb_log_iters == 0:
             
             if args.log_wandb:
                 accelerator.log(
                     {
-                        "mel_loss": mel_loss.item(), 
-                        "refined_mel_loss": refined_mel_loss.item(), 
-                        "stop_loss": stop_loss.item(),
-                        "total_loss": loss.item()
+                        "mel_loss": mel_loss, 
+                        "refined_mel_loss": refined_mel_loss, 
+                        "stop_loss": stop_loss,
+                        "total_loss": loss
                     }, 
                     step=completed_steps
                 )
@@ -258,17 +273,29 @@ for epoch in range(args.training_epochs):
         refined_mel_loss = F.mse_loss(mels_postnet_out, mels)
         stop_loss = F.binary_cross_entropy_with_logits(stop_preds.reshape(-1,1), stops.reshape(-1,1))
 
-        val_mel_loss += mel_loss
-        val_rmel_loss += refined_mel_loss
-        val_stop_loss += stop_loss
+        val_mel_loss += torch.mean(accelerator.gather_for_metrics(mel_loss)).item()
+        val_rmel_loss += torch.mean(accelerator.gather_for_metrics(refined_mel_loss)).item()
+        val_stop_loss += torch.mean(accelerator.gather_for_metrics(stop_loss)).item()
         num_losses += 1
+
+        val_mel_loss = val_mel_loss / num_losses
+        val_rmel_loss = val_rmel_loss / num_losses
+        val_stop_loss = val_stop_loss / num_losses
+        val_loss = val_mel_loss + val_rmel_loss + val_stop_loss
+
+        accelerator.print("Loss {:.4f} | Mel Loss {:.4f} | RMel Loss {:.4f} | Stop Loss {:.4f}".format(
+                val_loss, 
+                val_mel_loss, 
+                val_rmel_loss, 
+                val_stop_loss
+            ))
 
         if accelerator.is_main_process:
             if save_first:
 
                 # Extract tensors
-                true_mel = mels[0].T.to("cpu")
-                pred_mel = mels_out[0].T.to("cpu")
+                true_mel = denormalize(mels[0].T.to("cpu"))
+                pred_mel = denormalize(mels_postnet_out[0].T.to("cpu"))
                 attention = attention_weights[0].T.to("cpu")
 
                 # Make subplots (3 rows, 1 column)
@@ -299,13 +326,7 @@ for epoch in range(args.training_epochs):
 
         save_first = False
     
-    val_mel_loss = val_mel_loss / num_losses
-    val_rmel_loss = val_rmel_loss / num_losses
-    val_stop_loss = val_stop_loss / num_losses
-    val_loss = val_mel_loss + val_rmel_loss + val_stop_loss
-
-    accelerator.print(f"Loss: {round(val_loss.item(), 4)} | Mel Loss: {round(val_mel_loss.item(), 4)} | RMel Loss: {round(val_rmel_loss.item(), 4)} | Stop Loss: {round(val_stop_loss.item(), 4)}")
-
+    
     if args.log_wandb:
         
         accelerator.log(
