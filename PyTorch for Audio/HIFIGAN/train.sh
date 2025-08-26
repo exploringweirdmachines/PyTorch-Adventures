@@ -1,8 +1,8 @@
 accelerate launch train.py \
-    --experiment_name test \
+    --experiment_name test_norm \
     --working_directory work_dir \
-    --path_to_train_manifest data/train_manifest.txt \
-    --path_to_val_manifest data/val_manifest.txt \
+    --path_to_train_manifest data/train_metadata.csv \
+    --path_to_val_manifest data/test_metadata.csv \
     --training_epochs 3100 \
     --console_out_iters 5 \
     --wandb_log_iters 5 \
@@ -25,5 +25,4 @@ accelerate launch train.py \
     --hop_size 256 \
     --fmin 0 \
     --fmax 8000 \
-    --num_workers 16 \
-    --log_wandb
+    --num_workers 16

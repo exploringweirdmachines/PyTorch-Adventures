@@ -6,7 +6,8 @@ from torch.utils.data import DataLoader
 from transformers import set_seed
 from accelerate import Accelerator
 
-from dataset import MelDataset, compute_mel_spectrogram
+# from dataset import MelDataset, compute_mel_spectrogram
+from dataset import MelDataset, AudioMelConversions, pad_for_mel
 from model import HIFIGAN, HIFIGANConfig
 from loss import feature_loss, generator_loss, discriminator_loss
 
@@ -60,6 +61,8 @@ def parse_args():
     parser.add_argument("--fmin", type=int, default=0)
     parser.add_argument("--fmax", type=int, default=8000)
     parser.add_argument("--fmax_loss", type=int, default=None)
+    parser.add_argument("--min_db", type=float, default=-100.)
+    parser.add_argument("--max_scaled_abs", type=float, default=4.)
     parser.add_argument("--num_workers", type=int, default=16)
     parser.add_argument("--log_wandb", action=argparse.BooleanOptionalAction)
 
@@ -110,7 +113,9 @@ trainset = MelDataset(path_to_manifest=args.path_to_train_manifest,
                       sampling_rate=args.sampling_rate,
                       fmin=args.fmin,
                       fmax=args.fmax,
-                      fmax_loss=args.fmax_loss)
+                      fmax_loss=args.fmax_loss, 
+                      min_db=args.min_db, 
+                      max_scaled_abs=args.max_scaled_abs)
 
 testset = MelDataset(path_to_manifest=args.path_to_val_manifest, 
                      segment_size=args.segment_size,
@@ -121,18 +126,28 @@ testset = MelDataset(path_to_manifest=args.path_to_val_manifest,
                      sampling_rate=args.sampling_rate,
                      fmin=args.fmin,
                      fmax=args.fmax,
-                     fmax_loss=args.fmax_loss)
+                     fmax_loss=args.fmax_loss,
+                     min_db=args.min_db, 
+                     max_scaled_abs=args.max_scaled_abs)
 
 trainloader = DataLoader(trainset, 
-                         batch_size=args.batch_size//accelerator.num_processes, 
+                         batch_size=16, 
                          shuffle=True, 
                          pin_memory=True)
 
 testloader = DataLoader(testset, 
-                        batch_size=args.batch_size//accelerator.num_processes, 
+                        batch_size=16, 
                         shuffle=False, 
                         pin_memory=True)
 
+### Load AudioMelConversions ###
+audio_mel_conv = AudioMelConversions(num_mels=args.num_mels, 
+                                     sampling_rate=args.sampling_rate, 
+                                     n_fft=args.n_fft, 
+                                     window_size=args.window_size, 
+                                     hop_size=args.hop_size, 
+                                     fmin=args.fmin, 
+                                     fmax=args.fmax_loss)
 ### Prepare Everything ###
 model, optim_d, optim_g, trainloader, testloader, scheduler_d, scheduler_g = accelerator.prepare(
     model, optim_d, optim_g, trainloader, testloader, scheduler_d, scheduler_g
@@ -167,20 +182,12 @@ for epoch in range(completed_epochs, args.training_epochs):
         audio = audio.to(accelerator.device)
         mel_target = mel_target.to(accelerator.device)
 
-        ### Generate Audio from Mel ###
+        ### Generate Audio from Mel ###        
         gen_audio = accelerator.unwrap_model(model).generator(mel)
   
         ### Compute Mel for Generated Audio ###
-        gen_audio_mel = compute_mel_spectrogram(gen_audio.squeeze(1), 
-                                                sampling_rate=args.sampling_rate,
-                                                n_fft=args.n_fft, 
-                                                window_size=args.window_size, 
-                                                hop_size=args.hop_size, 
-                                                fmin=args.fmin, 
-                                                fmax=args.fmax_loss, 
-                                                num_mels=args.num_mels, 
-                                                center=False, 
-                                                normalized=False)
+        gen_audio_padded = pad_for_mel(gen_audio, n_fft=args.n_fft, hop_size=args.hop_size)
+        gen_audio_mel = audio_mel_conv.audio2mel(gen_audio_padded.squeeze(1), do_norm=True)
 
         ### Update Discriminator ###
         optim_d.zero_grad()
@@ -198,7 +205,6 @@ for epoch in range(completed_epochs, args.training_epochs):
 
         ### Update Generator ###
         optim_g.zero_grad()
-
         loss_mel = F.l1_loss(mel_target, gen_audio_mel) * args.lambda_mel
 
         mpd_real_outs, mpd_gen_outs, mpd_real_feat_maps, mpd_gen_feat_maps = accelerator.unwrap_model(model).mpd(audio, gen_audio)
@@ -250,17 +256,9 @@ for epoch in range(completed_epochs, args.training_epochs):
             gen_audio = accelerator.unwrap_model(model).generator(mel)
 
         ### Compute Mel for Generated Audio ###
-        gen_audio_mel = compute_mel_spectrogram(gen_audio.squeeze(1), 
-                                                sampling_rate=args.sampling_rate,
-                                                n_fft=args.n_fft, 
-                                                window_size=args.window_size, 
-                                                hop_size=args.hop_size, 
-                                                fmin=args.fmin, 
-                                                fmax=args.fmax_loss, 
-                                                num_mels=args.num_mels, 
-                                                center=False, 
-                                                normalized=False)
-        
+        gen_audio_padded = pad_for_mel(gen_audio, n_fft=args.n_fft, hop_size=args.hop_size)
+        gen_audio_mel = audio_mel_conv.audio2mel(gen_audio_padded.squeeze(1), do_norm=True)
+
         loss_mel = F.l1_loss(mel_target, gen_audio_mel) 
 
         loss_mel = torch.mean(accelerator.gather_for_metrics(loss_mel))

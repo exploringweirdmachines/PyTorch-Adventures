@@ -1,89 +1,137 @@
 import random
+import pandas as pd
 import torch
-import torchaudio
 import torch.nn.functional as F
+import torchaudio
 from torch.utils.data import Dataset
-from librosa.filters import mel
+import librosa
 
-def log_scale_spectrograms(spectrogram, clip_val=1e-5):
-    return torch.log(torch.clamp(spectrogram, min=clip_val))
+import numpy as np
 
-def compute_mel_spectrogram(audio, 
-                            sampling_rate, 
-                            n_fft, 
-                            window_size, 
-                            hop_size, 
-                            fmin, 
-                            fmax, 
-                            num_mels, 
-                            center=False, 
-                            normalized=False):
+def load_wav(path_to_audio, sr=22050):
+    audio, orig_sr = torchaudio.load(path_to_audio)
 
-    mel_transform = torchaudio.transforms.MelSpectrogram(
-        sample_rate=sampling_rate,
-        n_fft=n_fft,
-        win_length=window_size,
-        hop_length=hop_size,
-        f_min=fmin,
-        f_max=fmax,
-        n_mels=num_mels,
-        window_fn=torch.hann_window,
-        center=center,
-        power=1.0,
-        pad_mode='reflect',
-        norm='slaney',
-        mel_scale='slaney',
-        normalized=normalized
-    ).to(audio.device)
-        
+    if sr != orig_sr:
+        audio = torchaudio.functional.resample(audio, orig_freq=orig_sr, new_freq=sr)
+
+    return audio.squeeze(0)
+
+def amp_to_db(x, min_db=-100):
+    ### Forces min DB to be -100
+    ### 20 * torch.log10(1e-5) = 20 * -5 = -100
+    clip_val = 10 ** (min_db / 20)
+    return 20 * torch.log10(torch.clamp(x, min=clip_val))
+
+def db_to_amp(x):
+    return 10 ** (x / 20)
+
+def normalize(x, 
+              min_db=-100., 
+              max_abs_val=4):
+
+    x = (x - min_db) / -min_db
+    x = 2 * max_abs_val * x - max_abs_val
+    x = torch.clip(x, min=-max_abs_val, max=max_abs_val)
+    
+    return x
+
+def denormalize(x, 
+                min_db=-100, 
+                max_abs_val=4):
+    
+    x = torch.clip(x, min=-max_abs_val, max=max_abs_val)
+    x = (x + max_abs_val) / (2 * max_abs_val)
+    x = x * -min_db + min_db
+
+    return x
+
+def pad_for_mel(x, n_fft, hop_size):
     pad = ((n_fft - hop_size) // 2)
-    reflect_for_mel_audio = F.pad(audio, (pad, pad), mode='reflect')
+    return F.pad(x, (pad, pad), mode="reflect")
 
-    mel = mel_transform(reflect_for_mel_audio)
-
-    mel = log_scale_spectrograms(mel)
-
-    return mel
-
-class ComputeMelSpectrogram:
-    def __init__(self, n_fft, num_mels, sampling_rate, hop_size, window_size, fmin, fmax):
+class AudioMelConversions:
+    def __init__(self,
+                 num_mels=80,
+                 sampling_rate=22050, 
+                 n_fft=1024, 
+                 window_size=1024, 
+                 hop_size=256,
+                 fmin=0, 
+                 fmax=8000,
+                 center=False,
+                 min_db=-100, 
+                 max_scaled_abs=4):
         
-        self.n_fft = n_fft 
         self.num_mels = num_mels
         self.sampling_rate = sampling_rate
-        self.hop_size = hop_size
+        self.n_fft = n_fft
         self.window_size = window_size
+        self.hop_size = hop_size
         self.fmin = fmin
         self.fmax = fmax
+        self.center = center
+        self.min_db = min_db
+        self.max_scaled_abs = max_scaled_abs
 
-        ### Compute Mel Projection Matrix ###
-        self.mel = torch.from_numpy(
-            mel(
-                sr=sampling_rate, 
-                n_fft=n_fft, 
-                n_mels=num_mels, 
-                fmin=fmin, 
-                fmax=fmax
-            )
-        )
+        self.spec2mel = self._get_spec2mel_proj()
+        self.mel2spec = torch.linalg.pinv(self.spec2mel)
+
+    def _get_spec2mel_proj(self):
+        mel = librosa.filters.mel(sr=self.sampling_rate, 
+                                  n_fft=self.n_fft, 
+                                  n_mels=self.num_mels, 
+                                  fmin=self.fmin, 
+                                  fmax=self.fmax)
+        return torch.from_numpy(mel)
+    
+    def audio2mel(self, audio, do_norm=False):
+
+        if not isinstance(audio, torch.Tensor):
+            audio = torch.tensor(audio, dtype=torch.float32)
+
+        spectrogram = torch.stft(input=audio, 
+                                 n_fft=self.n_fft, 
+                                 hop_length=self.hop_size, 
+                                 win_length=self.window_size, 
+                                 window=torch.hann_window(self.window_size).to(audio.device), 
+                                 center=self.center, 
+                                 pad_mode="reflect", 
+                                 normalized=False, 
+                                 onesided=True,
+                                 return_complex=True)
         
-        self.hann_window = torch.hann_window(window_size)
+        spectrogram = torch.abs(spectrogram)
+        
+        mel = torch.matmul(self.spec2mel.to(spectrogram.device), spectrogram)
 
-    def __call__(self, audio):
+        mel = amp_to_db(mel, self.min_db)
+        
+        if do_norm:
+            mel = normalize(mel, min_db=self.min_db, max_abs_val=self.max_scaled_abs)
 
-        pad = int((self.n_fft-self.hop_size)/2)
-        audio = torch.nn.functional.pad(audio, (pad, pad), mode='reflect')
+        return mel
+    
+    def mel2audio(self, mel, do_denorm=False, griffin_lim_iters=60):
 
-        spec = torch.stft(audio, self.n_fft, hop_length=self.hop_size, win_length=self.window_size, window=self.hann_window.to(audio.device),
-                          center=False, pad_mode='reflect', normalized=False, onesided=True, return_complex=True)
-        spec = torch.view_as_real(spec)
-        spec = torch.sqrt(spec[..., 0] ** 2 + spec[..., 1] ** 2 + 1e-9)
+        if do_denorm:
+            mel = denormalize(mel, min_db=self.min_db, max_abs_val=self.max_scaled_abs)
 
-        spec = torch.matmul(self.mel.to(audio.device), spec)
-        spec = log_scale_spectrograms(spec)
+        mel = db_to_amp(mel)
 
-        return spec
+        spectrogram = torch.matmul(self.mel2spec.to(mel.device), mel).cpu().numpy()
 
+        audio = librosa.griffinlim(S=spectrogram, 
+                                   n_iter=griffin_lim_iters, 
+                                   hop_length=self.hop_size, 
+                                   win_length=self.window_size, 
+                                   n_fft=self.n_fft,
+                                   window="hann")
+
+        audio *= 32767 / max(0.01, np.max(np.abs(audio)))
+        
+        audio = audio.astype(np.int16)
+
+        return audio
 
 class MelDataset(Dataset):
     def __init__(self, 
@@ -97,10 +145,11 @@ class MelDataset(Dataset):
                  fmin=0, 
                  fmax=8000, 
                  fmax_loss=None,
-                 max_audio_magnitude=0.95):
-        
-        with open(path_to_manifest, "r") as f:
-            self.audio_files = [line.strip() for line in f.readlines()]
+                 max_audio_magnitude=0.95, 
+                 min_db=-100, 
+                 max_scaled_abs=4):
+
+        self.audio_files = list(pd.read_csv(path_to_manifest)["file_path"])
 
         self.segment_size = segment_size
         self.sampling_rate = sampling_rate
@@ -112,6 +161,28 @@ class MelDataset(Dataset):
         self.fmax = fmax
         self.fmax_loss = fmax_loss
         self.max_audio_magnitude = max_audio_magnitude
+
+        common_args = dict(
+            num_mels=num_mels, 
+            sampling_rate=sampling_rate,
+            n_fft=n_fft, 
+            window_size=window_size, 
+            hop_size=hop_size, 
+            fmin=fmin, 
+            center=False,
+            min_db=min_db, 
+            max_scaled_abs=max_scaled_abs
+        )
+
+        self.audio_mel_conv = AudioMelConversions(
+            **common_args,
+            fmax=fmax,
+        )
+
+        self.audio_mel_conv_loss = AudioMelConversions(
+            **common_args,
+            fmax=None,
+        )
     
     def __len__(self):
         return len(self.audio_files)
@@ -135,26 +206,21 @@ class MelDataset(Dataset):
         else:
             audio = torch.nn.functional.pad(audio, (0, self.segment_size - audio.size(1)), 'constant')
 
-        mel = compute_mel_spectrogram(audio=audio, 
-                                      sampling_rate=self.sampling_rate, 
-                                      n_fft=self.n_fft, 
-                                      window_size=self.win_size, 
-                                      hop_size=self.hop_size, 
-                                      fmin=self.fmin, 
-                                      fmax=self.fmax, 
-                                      num_mels=self.num_mels, 
-                                      center=False, 
-                                      normalized=False)   
+        audio_padded_for_mel = pad_for_mel(audio, self.n_fft, self.hop_size)
 
-        mel_loss = compute_mel_spectrogram(audio=audio, 
-                                           sampling_rate=self.sampling_rate, 
-                                           n_fft=self.n_fft, 
-                                           window_size=self.win_size, 
-                                           hop_size=self.hop_size, 
-                                           fmin=self.fmin, 
-                                           fmax=self.fmax_loss, 
-                                           num_mels=self.num_mels, 
-                                           center=False, 
-                                           normalized=False)
-        
+        mel = self.audio_mel_conv.audio2mel(audio_padded_for_mel, do_norm=True)
+        mel_loss = self.audio_mel_conv_loss.audio2mel(audio_padded_for_mel, do_norm=True)
+
         return (mel.squeeze(0), audio, mel_loss.squeeze(0))
+
+
+if __name__ == "__main__":
+
+    from torch.utils.data import DataLoader
+
+    dataset = MelDataset(path_to_manifest="data/train_metadata.csv")
+
+    loader = DataLoader(dataset, batch_size=4)
+
+    for a, b, c in loader:
+        pass
