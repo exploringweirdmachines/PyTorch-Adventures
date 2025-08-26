@@ -1,12 +1,10 @@
-import random
 import pandas as pd
 import torch
 import torch.nn.functional as F
 import torchaudio
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset
 import librosa
 from tokenizer import Tokenizer
-import matplotlib.pyplot as plt
 
 import numpy as np
 
@@ -18,10 +16,11 @@ def load_wav(path_to_audio, sr=22050):
 
     return audio.squeeze(0)
 
-def amp_to_db(x):
+def amp_to_db(x, min_db=-100):
     ### Forces min DB to be -100
     ### 20 * torch.log10(1e-5) = 20 * -5 = -100
-    return 20 * torch.log10(torch.clamp(x, min=1e-5))
+    clip_val = 10 ** (min_db / 20)
+    return 20 * torch.log10(torch.clamp(x, min=clip_val))
 
 def db_to_amp(x):
     return 10 ** (x / 20)
@@ -101,7 +100,7 @@ class AudioMelConversions:
         
         mel = torch.matmul(self.spec2mel.to(spectrogram.device), spectrogram)
 
-        mel = amp_to_db(mel)
+        mel = amp_to_db(mel, self.min_db)
         
         if do_norm:
             mel = normalize(mel, min_db=self.min_db, max_abs_val=self.max_scaled_abs)
@@ -242,14 +241,21 @@ def TTSCollator():
     return _collate_fn
 
 class BatchSampler:
-    def __init__(self, dataset, batch_size):
+    def __init__(self, dataset, batch_size, drop_last=False):
         self.sampler = torch.utils.data.SequentialSampler(dataset)
         self.batch_size = batch_size
+        self.drop_last = drop_last
         self.random_batches = self._make_batches()
 
     def _make_batches(self):
 
         indices = [i for i in self.sampler]
+
+        if self.drop_last:
+
+            total_size = (len(indices) // self.batch_size) * self.batch_size
+            indices = indices[:total_size]
+
         batches = [indices[i:i+self.batch_size] for i in range(0, len(indices), self.batch_size)]
         random_indices = torch.randperm(len(batches))
         return [batches[i] for i in random_indices]
@@ -260,152 +266,3 @@ class BatchSampler:
 
     def __len__(self):
         return len(self.random_batches)
-
-if __name__ == "__main__":
-    
-    
-
-    from torch.utils.data import DataLoader
-
-    dataset = TTSDataset("data/train_metadata.csv")
-    
-    loader = DataLoader(dataset, collate_fn=TTSCollator(), batch_sampler=BatchSampler(dataset, batch_size=4))
-    for sample in loader:
-        print(sample[2].min(), sample[2].max())
-        break
-
-
-# class RandomBucketBatchSampler(Sampler):
-#     def __init__(self, lengths, batch_size, bucket_size=100, drop_last=False):
-
-#         self.lengths = lengths
-#         self.batch_size = batch_size
-#         self.bucket_size = bucket_size
-#         self.drop_last = drop_last
-#         self.buckets = self._create_buckets()
-
-#     def _create_buckets(self):
-#         # Sort indices by length
-#         sorted_indices = sorted(range(len(self.lengths)), key=lambda i: self.lengths[i])
-        
-#         # Group into buckets
-#         return [
-#             sorted_indices[i:i+self.bucket_size]
-#             for i in range(0, len(sorted_indices), self.bucket_size)
-#         ]
-
-#     def __iter__(self):
-#         all_batches = []
-
-#         for bucket in self.buckets:
-#             if len(bucket) < self.batch_size and self.drop_last:
-#                 continue
-            
-#             # Shuffle within each bucket
-#             random.shuffle(bucket)
-
-#             # Split bucket into batches
-#             batches = [
-#                 bucket[i:i+self.batch_size]
-#                 for i in range(0, len(bucket), self.batch_size)
-#             ]
-            
-#             if self.drop_last:
-#                 batches = [b for b in batches if len(b) == self.batch_size]
-
-#             all_batches.extend(batches)
-
-#         # Shuffle batch order across buckets
-#         random.shuffle(all_batches)
-
-#         for batch in all_batches:
-#             yield batch
-
-#     def __len__(self):
-#         count = 0
-#         for bucket in self.buckets:
-#             n_batches = len(bucket) // self.batch_size
-#             if not self.drop_last and len(bucket) % self.batch_size:
-#                 n_batches += 1
-#             count += n_batches
-#         return count
-    
-# def TTSCollator():
-
-#     tokenizer = Tokenizer()
-
-#     def _collate_fn(batch):
-        
-#         texts = [tokenizer.encode(b[0]) for b in batch]
-#         mels = [b[1] for b in batch]
-        
-#         ### Get Lengths of Texts and Mels ###
-#         input_lengths = torch.tensor([t.shape[0] for t in texts], dtype=torch.long)
-#         output_lengths = torch.tensor([m.shape[1] for m in mels], dtype=torch.long)
-
-#         ### Sort by Text Length (as we will be using packed tensors later) ###
-#         input_lengths, sorted_idx = input_lengths.sort(descending=True)
-#         texts = [texts[i] for i in sorted_idx]
-#         mels = [mels[i] for i in sorted_idx]
-#         output_lengths = output_lengths[sorted_idx]
-
-#         ### Pad Text ###
-#         text_padded = torch.nn.utils.rnn.pad_sequence(texts, batch_first=True, padding_value=tokenizer.pad_token_id)
-
-#         ### Pad Mel Sequences ###
-#         max_target_len = max(output_lengths).item()
-#         num_mels = mels[0].shape[0]
-        
-#         ### Get gate which tells when to stop decoding. 0 is keep decoding, 1 is stop ###
-#         mel_padded = torch.zeros((len(mels), num_mels, max_target_len))
-#         gate_padded = torch.zeros((len(mels), max_target_len))
-
-#         for i, mel in enumerate(mels):
-#             t = mel.shape[1]
-#             mel_padded[i, :, :t] = mel
-#             gate_padded[i, t-1:] = 1
-        
-#         mel_padded = mel_padded.transpose(1,2)
-
-#         # return text_padded, input_lengths, mel_padded, gate_padded, output_lengths
-#         return text_padded, input_lengths, mel_padded, gate_padded, build_padding_mask(input_lengths), build_padding_mask(output_lengths)
-
-
-#     return _collate_fn
-        
-
-# if __name__ == "__main__":
-
-#     from torch.utils.data import DataLoader
-
-#     dataset = TTSDataset("data/train_metadata.csv")
-
-#     batch_sampler = RandomBucketBatchSampler(
-#         lengths=dataset.transcript_lengths,
-#         batch_size=8,
-#         bucket_size=100,
-#         drop_last=False
-#     )
-
-#     dataloader = DataLoader(
-#         dataset,
-#         batch_sampler=batch_sampler,
-#         collate_fn=TTSCollator(),
-#         num_workers=32
-#     )
-
-#     loader = DataLoader(dataset, batch_size=8, num_workers=32, collate_fn=TTSCollator())
-
-#     for idx, _ in enumerate(dataloader):
-#         print(idx)
-
-#     print(len(dataloader))
-    
-#     # for text_padded, input_lengths, mel_padded, gate_padded, encoder_mask, decoder_mask in dataloader:
-#     #     print(gate_padded.sum(axis=-1))
-#     #     gate_padded = gate_padded.reshape(-1,1)
-#     #     decoder_mask = ~decoder_mask.reshape(-1).bool()
-
-#     #     print(gate_padded[decoder_mask].sum())
-#     #     print("---")
-       

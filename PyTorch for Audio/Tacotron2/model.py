@@ -432,7 +432,7 @@ class Decoder(nn.Module):
         self.h[0], self.c[0] = self.rnn[0](rnn_input, (self.h[0], self.c[0]))
 
         ### Dropout ###
-        attn_hidden = F.dropout(self.h[0], config.attention_dropout_p, self.training)
+        attn_hidden = F.dropout(self.h[0], self.config.attention_dropout_p, self.training)
 
         ### Concat cumulative and prev weights ###
         attn_weights_cat = torch.cat(
@@ -458,7 +458,7 @@ class Decoder(nn.Module):
 
         self.h[1], self.c[1] = self.rnn[1](decoder_input, (self.h[1], self.c[1]))
 
-        decoder_hidden = F.dropout(self.h[1], config.decoder_dropout_p, self.training)
+        decoder_hidden = F.dropout(self.h[1], self.config.decoder_dropout_p, self.training)
 
         ### Projections ###
         next_pred_input = torch.cat([decoder_hidden, self.attn_context], dim=-1)
@@ -510,7 +510,7 @@ class Decoder(nn.Module):
 
         ### Mask ###
         decoder_mask = decoder_mask.unsqueeze(-1).bool()
-        mel_out = mel_outs.masked_fill(decoder_mask, 0.0)
+        mel_outs = mel_outs.masked_fill(decoder_mask, 0.0)
         mel_residual = mel_residual.masked_fill(decoder_mask, 0.0)
         attention_weights = attention_weights.masked_fill(decoder_mask, 0.0)
         stop_tokens = stop_tokens.masked_fill(decoder_mask.squeeze(), 1e3)
@@ -579,7 +579,7 @@ class Tacotron2(nn.Module):
     @torch.inference_mode()
     def inference(self, text, max_decode_steps=1000):
         
-        if text.ndim() == 1:
+        if text.ndim == 1:
             text = text.unsqueeze(0)
 
         assert text.shape[0] == 1, "Inference only written for Batch Size of 1"
