@@ -39,6 +39,9 @@ class Tacotron2Config:
     attention_dropout_p: float = 0.1
 
 class LinearNorm(nn.Module):
+    """
+    Standard Linear layer with different intialization strategies
+    """
     def __init__(self, 
                  in_features, 
                  out_features, 
@@ -59,6 +62,9 @@ class LinearNorm(nn.Module):
     
 
 class ConvNorm(nn.Module):
+    """
+    Standard Convolutional layer with different intialization strategies
+    """
     def __init__(self, 
                  in_channels,
                  out_channels, 
@@ -87,6 +93,10 @@ class ConvNorm(nn.Module):
         return self.conv(x)
         
 class Encoder(nn.Module):
+
+    """
+    Learns embeddings on input characters from text
+    """
     def __init__(self, config):
         super(Encoder, self).__init__()
         
@@ -153,6 +163,12 @@ class Encoder(nn.Module):
         return outputs
     
 class Prenet(nn.Module):
+
+    """
+    At each decoder step, we will pass the previous timestep through the prenet.
+    This helps with both feature extraction and keeping stochasticity due to non-optional
+    dropout
+    """
     def __init__(self, 
                  input_dim, 
                  prenet_dim, 
@@ -189,6 +205,13 @@ class Prenet(nn.Module):
         return x
     
 class LocationLayer(nn.Module):
+    
+    """
+    This module looks at our Current attention weights (how much emphasis is
+    this decoder step placing on all the input characters) as well as the
+    cumulative attention weights (how much emphasis have we already put
+    on all the input characters) and uses a convolution to extract features from them
+    """
     def __init__(self, 
                  attention_n_filters, 
                  attention_kernel_size, 
@@ -196,7 +219,7 @@ class LocationLayer(nn.Module):
         super(LocationLayer, self).__init__()
 
         self.conv = ConvNorm(
-            in_channels=2, ### CHANGED TO 2 FROM 1 
+            in_channels=2, 
             out_channels=attention_n_filters, 
             kernel_size=attention_kernel_size, 
             padding="same",
@@ -212,6 +235,13 @@ class LocationLayer(nn.Module):
 
 
 class LocalSensitiveAttention(nn.Module):
+
+    """
+    The most important part of our model! It looks at:
+    - The entire encoded text output
+    - Our current decoder step for mel generation
+    - Attention weights of how much emphasis have we already placed on the different encoder outputs
+    """
     def __init__(self, 
                  attention_dim, 
                  decoder_hidden_size,
@@ -242,19 +272,25 @@ class LocalSensitiveAttention(nn.Module):
                                       cumulative_attention_weights, 
                                       mask=None):
 
+        ### Take our previous step of the mel sequence and project it (B x 1 x attention_dim)
         mel_proj = self.in_proj(mel_input).unsqueeze(1)
 
+        ### Take our entire encoder output and project it (B x encoder_len x attention_dim)
         if self.enc_proj_cache is None:
             self.enc_proj_cache = self.enc_proj(encoder_output)
 
-        cumulative_attention_weights = self.what_have_i_said(cumulative_attention_weights) #.unsqueeze(1))
+        ### Look at our attention weight history to understand where the model has already placed attention 
+        cumulative_attention_weights = self.what_have_i_said(cumulative_attention_weights)
 
+        ### Broadcast sum the single mel timestep over all of our encoder timesteps (both attention weight features and encoder features)
+        ### And scale with tanh to get scores between -1 and 1, and project to a single value to comput energies
         energies = self.energy_proj(
             torch.tanh(
                 mel_proj + self.enc_proj_cache + cumulative_attention_weights
             )
         ).squeeze(-1)
-
+        
+        ### Mask out pad regions (dont want to weight pad tokens from encoder)
         if mask is not None:
             energies = energies.masked_fill(mask.bool(), -float("inf"))
         
@@ -266,18 +302,26 @@ class LocalSensitiveAttention(nn.Module):
                 cumulative_attention_weights, 
                 mask=None):
 
+        ### Compute energies ###
         energies = self._calculate_alignment_energies(mel_input, 
                                                       encoder_output, 
                                                       cumulative_attention_weights, 
                                                       mask)
         
+        ### Convert to Probabilities (relation of our mel input to all the encoder outputs) ###
         attention_weights = F.softmax(energies, dim=1)
 
+        ### Weighted average of our encoder states by the learned probabilities 
         attention_context = torch.bmm(attention_weights.unsqueeze(1), encoder_output).squeeze(1)
 
         return attention_context, attention_weights
 
 class PostNet(nn.Module):
+
+    """
+    To take final generated Mel from LSTM and postprocess to allow for
+    any missing details to be added in (learns the residual!)
+    """
     def __init__(self, 
                  num_mels, 
                  postnet_num_convs=5, 
