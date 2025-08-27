@@ -43,4 +43,15 @@ def random_split_and_prep_ljspeech_metadata(path_to_data, path_to_save="data/", 
 
 if __name__ == "__main__":
 
-    random_split_and_prep_ljspeech_metadata("/mnt/datadrive/data/LJSpeech-1.1")
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--path_to_ljspech", type=str, required=True)
+    parser.add_argument("--path_to_save", type=str, required=True)
+    parser.add_argument("--seed", type=int, default=42)
+
+    args = parser.parse_args()
+
+    random_split_and_prep_ljspeech_metadata(args.path_to_ljspeech, 
+                                            args.path_to_save,
+                                            args.seed)

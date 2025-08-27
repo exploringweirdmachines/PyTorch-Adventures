@@ -173,8 +173,6 @@ testloader = DataLoader(testset,
                         num_workers=args.num_workers,
                         collate_fn=collator)
 
-print(len(trainloader))
-
 ### Prepare Everything ###
 model, optimizer, trainloader, testloader = accelerator.prepare(
     model, optimizer, trainloader, testloader
