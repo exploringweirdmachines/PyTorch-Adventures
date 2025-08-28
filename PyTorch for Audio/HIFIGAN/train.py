@@ -4,9 +4,10 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from transformers import set_seed
+import accelerate
 from accelerate import Accelerator
+from safetensors.torch import load_file
 
-# from dataset import MelDataset, compute_mel_spectrogram
 from dataset import MelDataset, AudioMelConversions, pad_for_mel
 from model import HIFIGAN, HIFIGANConfig
 from loss import feature_loss, generator_loss, discriminator_loss
@@ -36,6 +37,10 @@ def parse_args():
     parser.add_argument("--lambda_mel", type=float, default=45.)
     parser.add_argument("--lambda_feature_mapping", type=float, default=2.)
 
+    ### FINETUNING CONFIG ###
+    parser.add_argument("--finetune", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--path_to_saved_mels", type=str, default=None)
+    parser.add_argument("--path_to_pretrained_weights", type=str, default=None)
 
     ### MODEL CONFIG ###
     parser.add_argument("--upsample_rates", type=int, nargs='+', default=(8, 8, 2, 2))
@@ -115,7 +120,9 @@ trainset = MelDataset(path_to_manifest=args.path_to_train_manifest,
                       fmax=args.fmax,
                       fmax_loss=args.fmax_loss, 
                       min_db=args.min_db, 
-                      max_scaled_abs=args.max_scaled_abs)
+                      max_scaled_abs=args.max_scaled_abs, 
+                      finetuning=args.finetune, 
+                      path_to_saved_mels=args.path_to_saved_mels)
 
 testset = MelDataset(path_to_manifest=args.path_to_val_manifest, 
                      segment_size=args.segment_size,
@@ -128,7 +135,9 @@ testset = MelDataset(path_to_manifest=args.path_to_val_manifest,
                      fmax=args.fmax,
                      fmax_loss=args.fmax_loss,
                      min_db=args.min_db, 
-                     max_scaled_abs=args.max_scaled_abs)
+                     max_scaled_abs=args.max_scaled_abs, 
+                     finetuning=args.finetune,
+                     path_to_saved_mels=args.path_to_saved_mels)
 
 trainloader = DataLoader(trainset, 
                          batch_size=16, 
@@ -147,13 +156,21 @@ audio_mel_conv = AudioMelConversions(num_mels=args.num_mels,
                                      window_size=args.window_size, 
                                      hop_size=args.hop_size, 
                                      fmin=args.fmin, 
-                                     fmax=args.fmax_loss)
+                                     fmax=args.fmax_loss,
+                                     min_db=args.min_db, 
+                                     max_scaled_abs=args.max_scaled_abs)
 ### Prepare Everything ###
 model, optim_d, optim_g, trainloader, testloader, scheduler_d, scheduler_g = accelerator.prepare(
     model, optim_d, optim_g, trainloader, testloader, scheduler_d, scheduler_g
 )
 
-### Load Checkpoint ###
+## Load Pretrained Weights if Finetuning ###
+if args.finetune:
+    accelerator.print("Loading Pretrained HIFIGAN for Finetuning")
+    accelerate.load_checkpoint_in_model(model=accelerator.unwrap_model(model),
+                                        checkpoint=args.path_to_pretrained_weights)
+
+### Load Checkpoint (will overwrite previous weights from finetuning if resuming) ###
 if args.resume_from_checkpoint is not None:
 
     ### Grab path to checkpoint ###
@@ -292,4 +309,5 @@ for epoch in range(completed_epochs, args.training_epochs):
     
     accelerator.print(f"Updating Learning Rate To: {scheduler_d.get_last_lr()[0]: .3e}")
 
+accelerator.save_state(output_dir=os.path.join(path_to_experiment, f"final_checkpoint"))
 accelerator.end_training()

@@ -1,14 +1,17 @@
 accelerate launch train.py \
-    --experiment_name hifigan \
+    --experiment_name hifigan_finetune_taco \
     --working_directory work_dir \
     --path_to_train_manifest data/train_metadata.csv \
     --path_to_val_manifest data/test_metadata.csv \
-    --training_epochs 3100 \
+    --path_to_saved_mels data/taco_gen_mels \
+    --path_to_pretrained_weights work_dir/taco_weights/hifigan_model.safetensors \
+    --finetune \
+    --training_epochs 500 \
     --console_out_iters 5 \
     --wandb_log_iters 5 \
-    --checkpoint_epochs 50 \
+    --checkpoint_epochs 10 \
     --batch_size 16 \
-    --learning_rate 0.0002 \
+    --learning_rate 0.00005 \
     --beta1 0.8 \
     --beta2 0.99 \
     --lr_decay 0.999 \
@@ -26,4 +29,5 @@ accelerate launch train.py \
     --fmin 0 \
     --fmax 8000 \
     --num_workers 16 \
-    --log_wandb
+    --log_wandb \
+    --resume_from_checkpoint checkpoint_120

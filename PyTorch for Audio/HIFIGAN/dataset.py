@@ -1,3 +1,4 @@
+import os
 import random
 import pandas as pd
 import torch
@@ -5,8 +6,9 @@ import torch.nn.functional as F
 import torchaudio
 from torch.utils.data import Dataset
 import librosa
-
 import numpy as np
+
+from tokenizer import Tokenizer
 
 def load_wav(path_to_audio, sr=22050):
     audio, orig_sr = torchaudio.load(path_to_audio)
@@ -133,7 +135,129 @@ class AudioMelConversions:
 
         return audio
 
+def build_padding_mask(lengths):
+
+    B = lengths.size(0)
+    T = torch.max(lengths).item()
+
+    mask = torch.zeros(B, T)
+    for i in range(B):
+        mask[i, lengths[i]:] = 1
+
+    return mask.bool()
+
+class TTSDataset(Dataset):
+
+    """
+    Dataset to train Tacotron2
+    """
+    def __init__(self, 
+                 path_to_metadata,
+                 sample_rate=22050,
+                 n_fft=1024, 
+                 window_size=1024, 
+                 hop_size=256, 
+                 fmin=0,
+                 fmax=8000, 
+                 num_mels=80, 
+                 center=False, 
+                 normalized=False, 
+                 min_db=-100, 
+                 max_scaled_abs=4):
+        
+        self.metadata = pd.read_csv(path_to_metadata)
+        self.sample_rate = sample_rate
+        self.n_fft = n_fft
+        self.win_size = window_size
+        self.hop_size = hop_size
+        self.fmin = fmin
+        self.fmax = fmax 
+        self.num_mels = num_mels
+        self.center = center
+        self.normalized = normalized
+        self.min_db = min_db
+        self.max_scaled_abs = max_scaled_abs
+
+        self.transcript_lengths = [len(Tokenizer().encode(t)) for t in self.metadata["normalized_transcript"]]
+
+        self.audio_proc = AudioMelConversions(num_mels=self.num_mels, 
+                                              sampling_rate=self.sample_rate, 
+                                              n_fft=self.n_fft, 
+                                              window_size=self.win_size, 
+                                              hop_size=self.hop_size, 
+                                              fmin=self.fmin, 
+                                              fmax=self.fmax, 
+                                              center=self.center,
+                                              min_db=self.min_db, 
+                                              max_scaled_abs=self.max_scaled_abs)
+        
+        
+    def __len__(self):
+        return len(self.metadata)
+    
+    def __getitem__(self, idx):
+
+        sample = self.metadata.iloc[idx]
+        
+        path_to_audio = sample["file_path"]
+        transcript = sample["normalized_transcript"]
+
+        audio = load_wav(path_to_audio, sr=self.sample_rate)
+
+        mel = self.audio_proc.audio2mel(audio, do_norm=True)
+
+        # return transcript, mel.squeeze(0) # Change so we get the filename as well
+        return transcript, mel.squeeze(0), path_to_audio
+
+def TTSCollator():
+
+    tokenizer = Tokenizer()
+
+    def _collate_fn(batch):
+        
+        texts = [tokenizer.encode(b[0]) for b in batch]
+        mels = [b[1] for b in batch]
+        paths = [b[2] for b in batch]
+        
+        ### Get Lengths of Texts and Mels ###
+        input_lengths = torch.tensor([t.shape[0] for t in texts], dtype=torch.long)
+        output_lengths = torch.tensor([m.shape[1] for m in mels], dtype=torch.long)
+
+        ### Sort by Text Length (as we will be using packed tensors later) ###
+        input_lengths, sorted_idx = input_lengths.sort(descending=True)
+        texts = [texts[i] for i in sorted_idx]
+        mels = [mels[i] for i in sorted_idx]
+        output_lengths = output_lengths[sorted_idx]
+
+        ### SORT PATHS AS WELL ###
+        paths = [paths[i] for i in sorted_idx]
+
+        ### Pad Text ###
+        text_padded = torch.nn.utils.rnn.pad_sequence(texts, batch_first=True, padding_value=tokenizer.pad_token_id)
+
+        ### Pad Mel Sequences ###
+        max_target_len = max(output_lengths).item()
+        num_mels = mels[0].shape[0]
+        
+        ### Get gate which tells when to stop decoding. 0 is keep decoding, 1 is stop ###
+        mel_padded = torch.zeros((len(mels), num_mels, max_target_len))
+        gate_padded = torch.zeros((len(mels), max_target_len))
+
+        for i, mel in enumerate(mels):
+            t = mel.shape[1]
+            mel_padded[i, :, :t] = mel
+            gate_padded[i, t-1:] = 1
+        
+        mel_padded = mel_padded.transpose(1,2)
+
+        return text_padded, input_lengths, mel_padded, gate_padded, build_padding_mask(input_lengths), build_padding_mask(output_lengths), paths # Return paths as well
+
+    return _collate_fn
+
 class MelDataset(Dataset):
+    """
+    Dataset to train HIFIGAN
+    """
     def __init__(self, 
                  path_to_manifest, 
                  segment_size=8192, 
@@ -147,7 +271,9 @@ class MelDataset(Dataset):
                  fmax_loss=None,
                  max_audio_magnitude=0.95, 
                  min_db=-100, 
-                 max_scaled_abs=4):
+                 max_scaled_abs=4,
+                 finetuning=False,
+                 path_to_saved_mels=None):
 
         self.audio_files = list(pd.read_csv(path_to_manifest)["file_path"])
 
@@ -161,6 +287,11 @@ class MelDataset(Dataset):
         self.fmax = fmax
         self.fmax_loss = fmax_loss
         self.max_audio_magnitude = max_audio_magnitude
+        self.finetuning = finetuning
+        self.path_to_saved_mels = path_to_saved_mels
+
+        if self.finetuning and self.path_to_saved_mels is None:
+            raise ValueError("When finetuning provide Teacher Forcing Generations as .npy files")
 
         common_args = dict(
             num_mels=num_mels, 
@@ -199,28 +330,57 @@ class MelDataset(Dataset):
             raise ValueError("{} SR doesn't match target {} SR".format(
                 sampling_rate, self.sampling_rate))
 
-        if audio.shape[1] >= self.segment_size:
-            max_audio_start = audio.shape[1] - self.segment_size
-            audio_start = random.randint(0, max_audio_start)
-            audio = audio[:, audio_start:audio_start+self.segment_size]
+        if not self.finetuning:
+
+            if audio.shape[1] >= self.segment_size:
+                max_audio_start = audio.shape[1] - self.segment_size
+                audio_start = random.randint(0, max_audio_start)
+                audio = audio[:, audio_start:audio_start+self.segment_size]
+            else:
+                audio = torch.nn.functional.pad(audio, (0, self.segment_size - audio.shape(1)), 'constant')
+
+            audio_padded_for_mel = pad_for_mel(audio, self.n_fft, self.hop_size)
+
+            mel = self.audio_mel_conv.audio2mel(audio_padded_for_mel, do_norm=True)
+            mel_loss = self.audio_mel_conv_loss.audio2mel(audio_padded_for_mel, do_norm=True)
+
+            
+            return (mel.squeeze(0), audio, mel_loss.squeeze(0))
+
         else:
-            audio = torch.nn.functional.pad(audio, (0, self.segment_size - audio.size(1)), 'constant')
+            
+            path_to_mel = os.path.join(self.path_to_saved_mels, f"{filename.split("/")[-1].split(".")[0]}.npy")
+            
+            mel = torch.from_numpy(np.load(path_to_mel))
 
-        audio_padded_for_mel = pad_for_mel(audio, self.n_fft, self.hop_size)
+            frames_per_mel_segment = self.segment_size // self.hop_size
+     
+            if audio.shape[1] >= self.segment_size:
+                
+                ### Grab Random Chunk of the Taco Generated Mel and its Cooresponding Audio ###
+                mel_start = random.randint(0, mel.shape[1] - frames_per_mel_segment - 1)
+                mel = mel[:, mel_start:mel_start + frames_per_mel_segment]
+                audio = audio[:, mel_start * self.hop_size:(mel_start + frames_per_mel_segment)*self.hop_size]
 
-        mel = self.audio_mel_conv.audio2mel(audio_padded_for_mel, do_norm=True)
-        mel_loss = self.audio_mel_conv_loss.audio2mel(audio_padded_for_mel, do_norm=True)
-
-        return (mel.squeeze(0), audio, mel_loss.squeeze(0))
-
+            else:
+                mel = torch.nn.functional.pad(mel, (0, frames_per_mel_segment - mel.shape[1]), 'constant')
+                audio = torch.nn.functional.pad(audio, (0, self.segment_size - audio.shape[1]), 'constant')
+            
+            ### Grab True Mel from Audio ###
+            audio_padded_for_mel = pad_for_mel(audio, self.n_fft, self.hop_size)
+            mel_loss = self.audio_mel_conv_loss.audio2mel(audio_padded_for_mel, do_norm=True)
+            
+            return mel, audio, mel_loss.squeeze(0)
+            
 
 if __name__ == "__main__":
 
     from torch.utils.data import DataLoader
+    from tqdm import tqdm
+    dataset = MelDataset(path_to_manifest="data/train_metadata.csv", finetuning=True, path_to_saved_mels="data/taco_gen_mels")
 
-    dataset = MelDataset(path_to_manifest="data/train_metadata.csv")
+    loader = DataLoader(dataset, batch_size=32, shuffle=True)
 
-    loader = DataLoader(dataset, batch_size=4)
+    for a, b, c in tqdm(loader):
 
-    for a, b, c in loader:
         pass
