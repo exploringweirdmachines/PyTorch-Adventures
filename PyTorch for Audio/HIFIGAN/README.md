@@ -61,6 +61,8 @@ accelerate launch train.py \
     --log_wandb
 ```
 
+You can see the results of training [here](https://api.wandb.ai/links/exploratorydataadventure/nmjxhnnn). I didnt train for all 3100 epochs as it would have taken a few days, but the model I produced was good enough for good inferences!
+
 ### Finetuning HIFIGAN
 
 We now have a model that can successfully generate audio from mel spectrograms! But there can be some small issues. Although we trained on Mel Spectrograms that had the same settings as our Tacotron2, our Tacotron2 model could have their own nuances and issues. So we want to finetune this model on actual Tacotron2 mel spectrograms to close any domain discrepancy between ground truth and generations. Our target is still the true audio, we just want to map from generated Tacotron2 spectrograms rather than true Mel Spectrograms. 
