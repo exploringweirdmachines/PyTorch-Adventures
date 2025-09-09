@@ -111,22 +111,21 @@ class SoftMax:
 
         exp_x = np.exp(shifted_x)
 
-        probs = exp_x / np.sum(exp_x, axis=-1, keepdims=True)
+        self.probs = exp_x / np.sum(exp_x, axis=-1, keepdims=True)
 
-        return probs
+        return self.probs
 
     def backward(self, output_grad):
-        
-        probs = self.forward(self.x)
 
-        gradient = np.zeros_like(probs)
+        gradient = np.zeros_like(self.probs)
 
         batch_size = len(self.x)
 
         for i in range(batch_size):
 
-            sample_probs = probs[i]
+            sample_probs = self.probs[i]
             
+            # Create the Jacobian Matrix -S_iS_j for non-diagonal terms, S_i (1-S_i) for diagonal terms
             j = -sample_probs.reshape(-1,1) * sample_probs.reshape(1,-1)
             j[np.diag_indices(j.shape[0])] = sample_probs * (1 - sample_probs)
 
@@ -136,20 +135,76 @@ class SoftMax:
         
         return gradient
 
-class CrossEntropyLoss:
+class _CrossEntropyLoss:
+    """
+    Cross Entropy Loss that assumes inputs are probabilities (already softmaxed).
+    Targets are integer class indices (no one-hot).
+    """
 
     def forward(self, y_true, y_pred):
-
+        """
+        y_true: (batch_size,) integer class indices
+        y_pred: (batch_size, num_classes) probabilities
+        """
         self.y_true = y_true
         self.y_pred = y_pred
 
-        loss = -np.sum(y_true * np.log(y_pred)) / y_true.shape[0]
-        
+        batch_size = y_pred.shape[0]
+
+        # Pick probability of the correct class for each sample
+        correct_class_probs = y_pred[np.arange(batch_size), y_true]
+
+        # Compute loss
+        loss = -np.mean(np.log(correct_class_probs + 1e-12))  # epsilon for safety
+
         return loss
-        
+
     def backward(self):
-        
-        grad = - self.y_true / self.y_pred
+        """
+        Gradient wrt probabilities
+        dL/dy_pred = -y_true / y_pred
+        But since y_true is an index, we only subtract at the correct class.
+        """
+        batch_size, num_classes = self.y_pred.shape
+        grad = np.zeros_like(self.y_pred)
+
+        # Only the correct class contributes to loss: -y_i / p_c
+        grad[np.arange(batch_size), self.y_true] = -1 / (self.y_pred[np.arange(batch_size), self.y_true] + 1e-12)
+
+        return grad
+    
+
+class CrossEntropyLoss:
+    def forward(self, y_true, logits):
+        """
+        y_true: [batch_size] integer class indices
+        logits: [batch_size, num_classes] raw scores (NOT softmaxed)
+        """
+        self.y_true = y_true
+        self.logits = logits
+
+        # numerically stable softmax
+        shifted_logits = logits - np.max(logits, axis=1, keepdims=True)
+        exp_logits = np.exp(shifted_logits)
+        self.probs = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+
+        # pick the probabilities of the correct class for each sample
+        batch_size = y_true.shape[0]
+        correct_class_probs = self.probs[np.arange(batch_size), y_true]
+
+        # cross-entropy loss
+        loss = -np.mean(np.log(correct_class_probs + 1e-12))
+        return loss
+
+    def backward(self):
+        """
+        Gradient of loss wrt logits (softmax + cross entropy simplified)
+        """
+        batch_size, num_classes = self.logits.shape
+        grad = self.probs.copy()
+
+        # subtract 1 at the correct class index
+        grad[np.arange(batch_size), self.y_true] -= 1
 
         return grad
 
@@ -181,7 +236,6 @@ class ReLU:
         grad[self.x > 0] = 1
         
         return grad * output_grad
-    
 
 class NeuralNetwork:
     

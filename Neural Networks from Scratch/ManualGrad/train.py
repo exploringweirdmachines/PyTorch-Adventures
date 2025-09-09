@@ -16,8 +16,6 @@ network.add(nn.ReLU())
 network.add(nn.Linear(256,128))
 network.add(nn.ReLU())
 network.add(nn.Linear(128,10))
-network.add(nn.SoftMax())
-
 print(network)
 
 ### Prep Dataset ###
@@ -29,9 +27,8 @@ def collate_fn(batch):
     ### Prep and Scale Images ###
     images = np.concatenate([np.array(i[0]).reshape(1,784)for i in batch]) / 255
 
-    ### One Hot Encode Label (MNIST only has 10 classes) ###
-    labels = [i[1] for i in batch]
-    labels = np.eye(10)[labels]
+    ### Labels ###
+    labels = np.array([i[1] for i in batch])
 
     return images, labels
 
@@ -62,7 +59,7 @@ while train:
         
         ### Get Outputs from Model ###
         output = network(images)
-        loss = loss_func.forward(y_pred=output, y_true=labels)
+        loss = loss_func.forward(logits=output, y_true=labels)
         loss_grad = loss_func.backward()
 
         ### Compute Gradients in Model ###
@@ -74,7 +71,6 @@ while train:
 
         ### Compute Accuracy ###
         preds = output.argmax(axis=-1)
-        labels = labels.argmax(axis=-1)
         acc = (preds == labels).sum() / len(preds)
 
         ### Store Loss for Plotting ###
@@ -88,11 +84,10 @@ while train:
 
                 ### Get Outputs from Model ###
                 output = network(images)
-                loss = loss_func.forward(y_pred=output, y_true=labels)
+                loss = loss_func.forward(logits=output, y_true=labels)
 
                 ### Compute Accuracy ###
                 preds = output.argmax(axis=-1)
-                labels = labels.argmax(axis=-1)
                 acc = (preds == labels).sum() / len(preds)
 
                 ### Store Loss for Plotting ###
