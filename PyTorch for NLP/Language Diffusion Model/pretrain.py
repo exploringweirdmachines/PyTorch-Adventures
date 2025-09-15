@@ -9,6 +9,8 @@ from datasets import load_from_disk
 from accelerate import Accelerator
 from tqdm import tqdm
 from tokenizer import get_tokenizer
+import bitsandbytes as bnb
+
 
 def parse_args():
     ### PARSE COMMAND LINE ARGS ###
@@ -166,6 +168,7 @@ tokenizer = get_tokenizer(args.hf_model_name)
 ### Load Model ###
 model = AutoModelForMaskedLM.from_pretrained(args.hf_model_name)
 model.resize_token_embeddings(len(tokenizer))
+# model.gradient_checkpointing_enable()
 
 model_parameters = filter(lambda p: p.requires_grad, model.parameters())
 params = sum([np.prod(p.size()) for p in model_parameters])

@@ -15,7 +15,7 @@ from data_utils import SFTCollator
 
 def parse_args():
     ### PARSE COMMAND LINE ARGS ###
-    parser = argparse.ArgumentParser(description="RoBERTa Pretraining Arguments on Wikipedia + BookCorpus")
+    parser = argparse.ArgumentParser(description="")
     parser.add_argument(
         "--experiment_name", 
         required=True, 
@@ -28,6 +28,13 @@ def parse_args():
         type=str
     )
     
+    parser.add_argument(
+        "--path_to_pretrained_checkpoint",
+        required=True,
+        type=str
+    )
+
+
     ##########################
     ### HUGGINGFACE CONFIG ###
     ##########################
@@ -78,7 +85,7 @@ def parse_args():
     parser.add_argument(
         "--num_training_steps", 
         help="Number of training steps to take",
-        default=15000,
+        default=30000,
         type=int
     )
 
@@ -121,7 +128,7 @@ def parse_args():
     parser.add_argument(
         "--checkpoint_interval",
         help="Number of iterations for checkpointing",
-        default=2500,
+        default=10000,
         type=int
     )
 
@@ -135,7 +142,7 @@ def parse_args():
     parser.add_argument(
         "--weight_decay",
         help="Weight decay constant for AdamW optimizer", 
-        default=0.01, 
+        default=0.05, 
         type=float
     )
 
@@ -164,12 +171,12 @@ if args.log_wandb:
     accelerator.init_trackers(args.experiment_name)
 
 ### Define Tokenizer ###
-tokenizer = get_tokenizer(args.hf_model_name, mode="sft")
+tokenizer = get_tokenizer(args.hf_model_name)
 
 ### Load Model ###
 model = ModernBertForMaskedLM.from_pretrained(args.hf_model_name)
 model.resize_token_embeddings(len(tokenizer))
-state_dict = load_file("work_dir/LDM_Pretraining_wiki/final_model/model.safetensors")
+state_dict = load_file(args.path_to_pretrained_checkpoint)
 model.load_state_dict(state_dict, strict=False)
 model.tie_weights()
 

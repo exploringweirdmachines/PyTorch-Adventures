@@ -7,7 +7,7 @@ from tokenizer import get_tokenizer
 
 def SFTCollator(model_name="answerdotai/ModernBERT-base"):
 
-    tokenizer = get_tokenizer(model_name, mode="sft")
+    tokenizer = get_tokenizer(model_name)
     eos_token = tokenizer.eos_token_id
 
     def _collate_fn(batch):

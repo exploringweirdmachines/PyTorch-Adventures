@@ -68,10 +68,10 @@ def prepare_data(args):
     cache_dir = args.huggingface_cache_dir
 
     ### Load tokenizer ###
-    tokenizer = get_tokenizer(args.hf_model_name, mode="sft")
+    tokenizer = get_tokenizer(args.hf_model_name)
 
     ### Load Datasets ###
-    dataset = load_dataset("tatsu-lab/alpaca", 
+    dataset = load_dataset("Open-Orca/OpenOrca", # "tatsu-lab/alpaca", 
                            split="train", 
                            num_proc=args.num_workers, 
                            cache_dir=cache_dir)
