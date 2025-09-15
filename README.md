@@ -67,19 +67,20 @@ There are a few other datasets that we will use but are inconsistent to automati
 - [**UNet for Image Segmentation**](PyTorch%20for%20Computer%20Vision/UNET%20for%20Segmentation/)&nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1936911862018556114)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/fBlLsugz6Q8) &nbsp;
 - [**Moving from Convolutions: Vision Transformer**](PyTorch%20for%20Computer%20Vision/Vision%20Transformer) &nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1960798533575155733)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/SjCwOKhzFno)&nbsp; [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1Mh-yaSWwfTs1UcOdRQjRIvLuj6PU6liZ?usp=sharing)
 - [**Masked Image Modeling with Masked Autoencoders**](PyTorch%20for%20Computer%20Vision/Masked%20AutoEncoder/)
-- **PixelCNN**
   
 ## Natural Language Processing ##
 - [**Causal Language Modeling: GPT**](PyTorch%20for%20NLP/GPT%20for%20Causal%20Language%20Models)&nbsp; [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1DZ406Ytb-ls1jDI1BovARwYq__ptr1Tx?usp=sharing)
   
 - [**Masked Language Modeling: RoBERTa**](PyTorch%20for%20NLP/RoBERTa%20for%20Masked%20Language%20Models)&nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1905059833721864239)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtube.com/playlist?list=PL16vydMdqFg9kpCd_kj92bUOA5P0STduv&feature=shared) &nbsp;&nbsp; [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1MChQ84-1VKBbjNCmzPQL02hxl-gckEYh?usp=sharing)
   
-- **Building Vision/Language Representations: CLIP**
+- [**Building Vision/Language Representations: CLIP**](PyTorch%20for%20NLP/CLIP/)
   
 - [**Attention is All You Need for Language Translation**](PyTorch%20for%20NLP/Seq2Seq%20for%20Neural%20Machine%20Translation/)&nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1899211464642122171)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://www.youtube.com/playlist?list=PL16vydMdqFg9g9xevVEl-MVVaK9jcqyC5) &nbsp;
   
 - [**Llama 4**](PyTorch%20for%20NLP/Llama4/)&nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1909095350197006780)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/yXbF-1n9wxs?feature=shared) &nbsp;
 
+- [**Language Diffusion Models**](PyTorch%20for%20NLP/Language%20Diffusion%20Model/)
+  
 ## Audio Processing ##
 - [**Intro to Audio Processing in PyTorch**](PyTorch%20for%20Audio/Intro%20to%20Audio%20Processing/)&nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1938310616974037242)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/55QWsm1itKo) &nbsp;[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1qjE2YCRvSI3JtH6To-fCvtZNiegfnFoT?usp=sharing)
 - **Audio Processing From Scratch**
@@ -96,8 +97,11 @@ There are a few other datasets that we will use but are inconsistent to automati
   - [**Intro to AutoEncoders**](PyTorch%20for%20Generation/AutoEncoders/Intro%20to%20AutoEncoders/Intro_To_AutoEncoders.ipynb)&nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1899201881890578688)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/p7yUWIySj8o)&nbsp; [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1DldfPN9q1uSA4UkZYHV-3Ms5be333EKN?usp=sharing)
   - [**Variational AutoEncoders**](PyTorch%20for%20Generation/AutoEncoders/Intro%20to%20AutoEncoders/Variational_AutoEncoders.ipynb)&nbsp; &nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1915394025865023770)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/9NgC0sh9Msc)&nbsp;[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1_NLc6g5UJ-tmRUXZbF5r1FgWoEApaLmH?usp=sharing)
   - [**Vector-Quantized Variational Autoencoders**](PyTorch%20for%20Generation/AutoEncoders/Intro%20to%20AutoEncoders/Vector_Quantized_Variational_AutoEncoders.ipynb)&nbsp; &nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1915386708310270446)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/1mi2MSvigcc)&nbsp;[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1QqdHlnfJV5BATUymrXy-wi3F8YUIQFpl?usp=sharing)
-  - **Gumbel Softmax Vector Quantization**
+
+- ### Quantization Methods
+  - [**Gumbel Softmax Vector Quantization**](PyTorch%20for%20Generation/AutoEncoders/Intro%20to%20AutoEncoders/gumbel_softmax_quantizer.ipynb)&nbsp;[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1nlHZlrFz0WV93k7n_VmdeUvAegJEoGay?usp=sharing)
   - [**Residual Vector Quantization**](PyTorch%20for%20Generation/AutoEncoders/Intro%20to%20AutoEncoders/Residual_Vector_Quantizer.ipynb)&nbsp; &nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1936906915096707198)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/ZnyfaQRQ8GI)&nbsp;[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1ljFb-z3sICEewYdp6Dmm8jFmlqIru_nf?usp=sharing)
+  - **Lookup-Free Quantization**
 
 - ### Generative Adversarial Networks ##
   - [**Intro to Generative Adversarial Networks**](PyTorch%20for%20Generation/Generative%20Adversarial%20Network/Intro%20to%20GANs/)&nbsp; &nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1924076585423905049)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/R9VOZnKEBE0)&nbsp;[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1s2zEnDKo0zr4hqzSmsDzQvWHs40KPkgz?usp=sharing)
@@ -105,7 +109,6 @@ There are a few other datasets that we will use but are inconsistent to automati
   - [**Wasserstein GAN**](PyTorch%20for%20Generation/Generative%20Adversarial%20Network/WGAN/)&nbsp; [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1HneZAIokGAZW8Eq0ussFBoaw3BmG3imm?usp=sharing)
   - **SuperResolution with SRGAN**
   - [**Image2Image Translation with CycleGAN**](PyTorch%20for%20Generation/Generative%20Adversarial%20Network/CycleGAN/)
-  - **HIFIGAN**
 
 - ### Diffusion ##
   - [**Intro to Diffusion**](PyTorch%20for%20Generation/Diffusion/Intro%20to%20Diffusion/) &nbsp; &nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1941464751432687844)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/_otkRnYaozY)&nbsp;[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1KBupTiAId1LO67IcM-yn3xkK81aj06sG?usp=sharing)
@@ -114,6 +117,11 @@ There are a few other datasets that we will use but are inconsistent to automati
   - **DDIM**
   - **Diffusion Transformers**
 
+- ### Autoregressive Generation
+
+  - [**PixelRNN**](PyTorch%20for%20Generation/Autoregressive%20Generation/PixelRNN/)
+  - [**PixelCNN**](PyTorch%20for%20Generation/Autoregressive%20Generation/PixelCNN/)
+ 
 ## Dive into Transformers ##
 
 - **Attention Mechanisms**
@@ -146,12 +154,12 @@ There are a few other datasets that we will use but are inconsistent to automati
   - [**Monte Carlo**](PyTorch%20for%20Reinforcement%20Learning/Intro%20to%20Reinforcement%20Learning/Model-Free%20Learning/monte_carlo.ipynb)&nbsp; &nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1936909659505398024)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/7j4krL1QQqY)&nbsp;[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1SttDsqUIZcZUZzh8p5Ir_rKdY9kcIK6O?usp=sharing)
   - [**SARSA**](PyTorch%20for%20Reinforcement%20Learning/Intro%20to%20Reinforcement%20Learning/Model-Free%20Learning/sarsa.ipynb)&nbsp; &nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1949520329551863862)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/nEDBDYDtGIM)&nbsp; [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1vGk4dck6EAXvlff6RJI9MMWayZ1ixpRb?usp=sharing)
   - [**Q Learning**](PyTorch%20for%20Reinforcement%20Learning/Intro%20to%20Reinforcement%20Learning/Model-Free%20Learning/q_learning.ipynb)&nbsp; &nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1949521428950159833)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/Sm2eXcTPd5s)&nbsp; [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1pH5knVA5Vc4hZSUM_GSv-sp58BeNHsMj?usp=sharing) 
-  - [**TD(N)**](PyTorch%20for%20Reinforcement%20Learning/Intro%20to%20Reinforcement%20Learning/Model-Free%20Learning/td_n.ipynb)&nbsp;[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1GdPHVH8zIElgWtFP4y-4sm1HsNcakjCa?usp=sharing) 
-  - [**TD(Lambda) + Eligibility Traces**](PyTorch%20for%20Reinforcement%20Learning/Intro%20to%20Reinforcement%20Learning/Model-Free%20Learning/td_lambda.ipynb)
+  - [**TD(N)**](PyTorch%20for%20Reinforcement%20Learning/Intro%20to%20Reinforcement%20Learning/Model-Free%20Learning/td_n.ipynb)&nbsp; &nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1963326830863093834)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/FenWuNaKNyQ)&nbsp;[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1GdPHVH8zIElgWtFP4y-4sm1HsNcakjCa?usp=sharing) 
+  - [**TD(Lambda) + Eligibility Traces**](PyTorch%20for%20Reinforcement%20Learning/Intro%20to%20Reinforcement%20Learning/Model-Free%20Learning/td_lambda.ipynb)&nbsp; &nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1967612074005070114)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/sMfJADpFca8)&nbsp;[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1fb0olJX8DR-fODhXRG6v3p4e_YiRsdbl?usp=sharing) 
 
 - ### Intro to Deep Reinforcement Learning
   #### A. Value Based Methods
-  - [**Deep Q Learning**](PyTorch%20for%20Reinforcement%20Learning/Intro%20to%20Deep%20Reinforcement%20Learning/Deep%20Q-Learning/deep_q_learning.ipynb)
+  - [**Deep Q Learning**](PyTorch%20for%20Reinforcement%20Learning/Intro%20to%20Deep%20Reinforcement%20Learning/Deep%20Q-Learning/deep_q_learning.ipynb)&nbsp; &nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1967609474362843535)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/WgLgFdtXNvQ)&nbsp;[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1LcGwNDl2sE3ZPcJmCE2XjHHyADvZflhd?usp=sharing) 
   - [**Double Deep Q Learning**](PyTorch%20for%20Reinforcement%20Learning/Intro%20to%20Deep%20Reinforcement%20Learning/Double%20Deep-Q%20Learning/double_deep_q_learning.ipynb)
   - [**Dueling Deep Q Learning**](PyTorch%20for%20Reinforcement%20Learning/Intro%20to%20Deep%20Reinforcement%20Learning/Dueling%20Deep-Q%20Learning/dueling_deep_q_learning.ipynb)
   - [**Prioritized Experience Replay**](PyTorch%20for%20Reinforcement%20Learning/Intro%20to%20Deep%20Reinforcement%20Learning/Prioritized%20Experience%20Replay/prioritized_experience_replay.ipynb)
@@ -167,14 +175,15 @@ There are a few other datasets that we will use but are inconsistent to automati
   - [**Synchronous Actor-Critic (A2C)**](PyTorch%20for%20Reinforcement%20Learning/Deep%20RL%20Policy%20Models/A2C/a2c.ipynb)
   - [**Trust Region Policy Optimzation  (TRPO)**](PyTorch%20for%20Reinforcement%20Learning/Deep%20RL%20Policy%20Models/Trust%20Region%20Policy%20Optimization/trpo.ipynb)
   - [**Proximal Policy Optimization (PPO)**](PyTorch%20for%20Reinforcement%20Learning/Deep%20RL%20Policy%20Models/Proximal%20Policy%20Optimization/ppo.ipynb)
-  - **Deep Deterministic Policy Gradient (DDPG)**
+  - [**Deep Deterministic Policy Gradient (DDPG)**](PyTorch%20for%20Reinforcement%20Learning/Continuous%20Control/DDPG/ddpg.ipynb)
   - **Twin Delayed DDPG (TD3)**
   - **Soft Actor Critic (SAC)**
 
 ## Tools
 - **Gradient Checkpointing**
 - [**Low Rank Adaptation**](PyTorch%20Tools/LoRA/)&nbsp; [<img src="src/visuals/x_logo.png" alt="drawing" style="width:20px;"/>](https://x.com/data_adventurer/status/1905749914002641138)&nbsp; [<img src="src/visuals/play_button.png" alt="drawing" style="width:30px;"/>](https://youtu.be/nhRYyXGkjSU) &nbsp;
-
+- **Knowledge Distillation**
 - [**Quantized Low Rank Adaptation**](PyTorch%20Tools/QLoRA/)
 - **TensorRT**
 - **DeepSpeed**
+- **Triton**
