@@ -453,7 +453,7 @@ class Wav2Vec2GumbelVectorQuantizer(nn.Module):
             ### These probabilities are scaled by the temperature parameter ###
             ### Setting hard to true will only return back a value of 1 at the index of the most likely code! ###
             codevector_probs = nn.functional.gumbel_softmax(hidden_states.float(), tau=self.temperature, hard=True)
-
+    
             ### Compute Perplexity ###
             codevector_soft_dist = hidden_states.view(batch_size * sequence_length, self.num_groups, -1).float().softmax(dim=-1)
             perplexity = self._compute_perplexity(codevector_soft_dist, mask_time_indices)
@@ -476,7 +476,7 @@ class Wav2Vec2GumbelVectorQuantizer(nn.Module):
 
         ### We will now reshape the codevector probs to be (batch*sequence, num_groups*codes_per_group) ###
         codevector_probs = codevector_probs.view(batch_size * sequence_length, -1)
-        
+
         ### Our codevectors have shape (1 x num_groups*codes_per_group * vq_dim//num_groups) ###
         ### We can add an extra dimension to our codevector_probs so it is (batch*sequence, num_groups*codes_per_group, 1) ###
         ### We can then multiply out codevector probs (which is just 1 for the selected code and 0 otherwise) ###
@@ -492,7 +492,6 @@ class Wav2Vec2GumbelVectorQuantizer(nn.Module):
         ### Now for the cool part, currently we have 2 codes for each intial input token, and each are of length 128 (assuming the final VQ dim is 256 and we had 2 groups) ###
         ### In total, we have 600 codes, which is not enough to represent a large diverse set of quantized latents, so instead, we will concatenate them together! This way ###
         ### We will have a total of 300 * 300 possibilities! ###
-        
         codevectors = codevectors.view(batch_size, sequence_length, -1)
 
         return codevectors, perplexity
@@ -602,7 +601,6 @@ class Wav2Vec2ForPreTraining(nn.Module):
         ### to our negatives. To do this, we need to add a dimension to our true_quantized features so its becomes
         ### (1 x Batch x Sequence Length x VQ_dim). This will create our quantized targets in the shape of 
         ### (Num_negatives + 1 x Batch x Sequence Length x VQ_dim)
-
         target_features = target_features.unsqueeze(0)
         targets = torch.cat([target_features, negative_features], dim=0) 
 
@@ -668,7 +666,7 @@ class Wav2Vec2ForPreTraining(nn.Module):
             ### the first batch goes from 0 to 99, and then the second batch goes from 100 to 199, and so on. So our negatives are indexed by both which batch its in 
             ### times which location in the sequence for that batch its in. So we can do an easy index to grab all of the corresponding quantized negative vectors! 
             negative_quantized_codes = quantized_codes.reshape(-1, vq_size)[sampled_negative_indices.flatten()]
-            
+
             ### Now we have all the quantized features for all of our sampled_negative_indexes! But, in this implementation, we also quantized non-masked indexes. ###
             ### We will deal with this later as you will see! For now, lets just reshape this to be (Num Negatives x Batch x Sequence Length x VQ_dim) ###
             negative_quantized_codes = negative_quantized_codes.reshape(batch_size, sequence_length, num_negatives, vq_size).permute(2,0,1,3)
@@ -717,7 +715,6 @@ class Wav2Vec2ForPreTraining(nn.Module):
             ### cosine_sim -> (Num_negatives + 1 x Batch x Sequence Length) ---> (Batch x Sequence_length x Num_negatives + 1) --->   (Batch*Sequence_length x Num_negatives + 1)   
             ### target -> (Batch x Sequence Length) ---> (Batch*Sequence Length)
             ### The target will be -100 everywhere (so we dont compute loss for it) and 0 where we have a span mask
-
             cosine_sim = cosine_sim.permute(1,2,0).reshape(batch_size*sequence_length, num_negatives+1)
             labels = torch.ones(len(cosine_sim), dtype=torch.long, device=cosine_sim.device) * -100
             labels[mask_time_indices.flatten()] = 0
@@ -935,3 +932,21 @@ def weight_init_strategy(config):
                 nn.init.uniform_(module.bias, a=-k, b=k)
     
     return _init_weights
+
+if __name__ == "__main__":
+
+    from utils import Wav2Vec2Config
+    from dataset import LibriSpeechDataset, Wav2Vec2CollateFunctionForPreTraining
+    from torch.utils.data import DataLoader
+
+    w2v2_config = Wav2Vec2Config(num_transformer_layers=2)
+    model = Wav2Vec2ForPreTraining(config=w2v2_config)
+    dataset = LibriSpeechDataset(path_to_data_root="/mnt/datadrive/data/LibriSpeech", 
+                                 include_splits=["dev-clean"])
+    collate_fn = Wav2Vec2CollateFunctionForPreTraining(config=w2v2_config)
+    loader = DataLoader(dataset, batch_size=2, collate_fn=collate_fn)
+
+    batch = next(iter(loader))
+    
+    out = model(**batch)
+  
