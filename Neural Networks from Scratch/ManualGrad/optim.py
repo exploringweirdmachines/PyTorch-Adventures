@@ -1,4 +1,4 @@
-import numpy as np
+import cupy as np ### USING NP NOTATION BUT CUPY ALMOST IDENTICAL TO NUMPY
 
 class SGD:
     def __init__(self, parameters, lr):
@@ -25,8 +25,8 @@ class Adam:
         self.eps = eps
 
         ### Create Momentum Vector for Each Parameter ###
-        self.m = [np.zeros_like(p) for p in parameters]
-        self.v = [np.zeros_like(p) for p in parameters]
+        self.m = [np.zeros_like(p.params) for p in parameters]
+        self.v = [np.zeros_like(p.params) for p in parameters]
 
         ### Step Index for Bias Correction ###
         self.t = 0
@@ -42,7 +42,7 @@ class Adam:
 
             bias_corrected_m = self.m[i] / (1 - self.beta1**self.t)
             bias_corrected_v = self.v[i] / (1 - self.beta2**self.t)
-
+            
             param.params -= self.lr * bias_corrected_m / (np.sqrt(bias_corrected_v) + self.eps)
 
     def zero_grad(self):
