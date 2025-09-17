@@ -1,13 +1,26 @@
 import cupy as np
 import math
 
-class Layer:
+class Operation:
     def forward(self, x):
         raise NotImplementedError
 
     def backward(self, grad):
         raise NotImplementedError
-    
+
+class GradLayer(Operation):
+
+    def parameters(self):
+        params = []
+        for attr_name, attr_values in self.__dict__.items():
+            if isinstance(attr_values, GradTensor):
+                params.append(attr_values)
+            
+            elif isinstance(attr_values, GradLayer):
+                params.extend(attr_values.parameters())
+
+        return params
+
 class GradTensor:
     def __init__(self, params):
         self.params = params
@@ -17,63 +30,132 @@ class GradTensor:
     def _zero_grad(self):
         self.grad = None
 
+#######################
 ### STANDARD LAYERS ###
-class Linear(Layer):
+#######################
+
+# class Linear(GradLayer):
+#     """
+#     Basic Implementation of the Linear Layer following nn.Linear
+#     y = xW^T + b
+#     """
+#     def __init__(self, in_features, out_features, bias=True):
+#         self.in_features = in_features
+#         self.out_features = out_features
+
+#         ### Initialization to Match nn.Linear ###
+#         k = 1 / self.in_features
+
+#         self.weight = GradTensor(
+#             np.random.uniform(
+#                 low=-math.sqrt(k),
+#                 high=math.sqrt(k), 
+#                 size=(in_features, out_features)
+#             )
+#         )
+
+#         self.bias = None
+#         if bias:
+#             self.bias = GradTensor(
+#                 np.random.uniform(
+#                     low=-math.sqrt(k), 
+#                     high=math.sqrt(k), 
+#                     size=(1, out_features)
+#                 )
+#             )
+
+#     def forward(self, x):
+#         # For backprop, dL/dW will need X^t, so save X for future use 
+#         self.x = x
+
+#         # X has shape (B x in_features), w has shape (in_feature x out_features)
+#         x = x @ self.weight.params
+
+#         if self.bias is not None:
+#             x = x + self.bias.params
+
+#         return x
+    
+#     def backward(self, output_grad):
+
+#         ### Derivative w.r.t. W: X^t @ output_grad 
+#         self.weight.grad = self.x.T @ output_grad
+
+#         ### Derivative of Bias is just the output grad summed along batch 
+#         if self.bias is not None:
+#             self.bias.grad = output_grad.sum(axis=0, keepdims=True)
+
+#         ### We need derivative w.r.t input for the next step 
+#         input_grad = output_grad @ self.weight.params.T
+
+#         return input_grad
+    
+#     def __repr__(self):
+#         return f"Linear(in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None})"
+
+class Linear(GradLayer):
     """
-    Basic Implementation of the Linear Layer following nn.Linear
-    y = xW^T + b
+    Optimized Linear layer for CuPy
+    y = x @ W + b
     """
     def __init__(self, in_features, out_features, bias=True):
         self.in_features = in_features
         self.out_features = out_features
 
-        ### Initialization to Match nn.Linear ###
-        k = 1 / self.in_features
-
+        k = 1 / in_features
         self.weight = GradTensor(
             np.random.uniform(
-                low=-math.sqrt(k),
-                high=math.sqrt(k), 
+                low=-np.sqrt(k),
+                high=np.sqrt(k),
                 size=(in_features, out_features)
             )
         )
 
-        self.bias = None
         if bias:
             self.bias = GradTensor(
                 np.random.uniform(
-                    low=-math.sqrt(k), 
-                    high=math.sqrt(k), 
+                    low=-np.sqrt(k),
+                    high=np.sqrt(k),
                     size=(1, out_features)
                 )
             )
+        else:
+            self.bias = None
 
     def forward(self, x):
-        # For backprop, dL/dW will need X^t, so save X for future use 
-        self.x = x
+        # Ensure contiguous float32 arrays
+        self.x = np.asarray(x, dtype=np.float32, order='C')
 
-        # X has shape (B x in_features), w has shape (in_feature x out_features)
-        x = x @ self.weight.params
+        out = np.empty((self.x.shape[0], self.out_features), dtype=np.float32)
+        np.matmul(self.x, self.weight.params, out=out)
 
         if self.bias is not None:
-            x = x + self.bias.params
+            out += self.bias.params  # broadcasted in-place
 
-        return x
+        return out
+
+    def backward(self, grad_output):
+        grad_output = np.asarray(grad_output, dtype=np.float32, order='C')
+
+        # Grad w.r.t weight: X^T @ grad_output
+        grad_W = np.empty_like(self.weight.params)
+        np.matmul(self.x.T, grad_output, out=grad_W)
+        self.weight.grad = grad_W
+
+        # Grad w.r.t bias: sum over batch, in-place
+        if self.bias is not None:
+            self.bias.grad = np.sum(grad_output, axis=0, keepdims=True)
+
+        # Grad w.r.t input: grad_output @ W^T
+        grad_input = np.empty_like(self.x)
+        np.matmul(grad_output, self.weight.params.T, out=grad_input)
+
+        return grad_input
+
+    def __repr__(self):
+        return f"Linear(in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None})"
     
-    def backward(self, output_grad):
-        ### Derivative w.r.t. W: X^t @ output_grad 
-        self.weight.grad = self.x.T @ output_grad
-
-        ### Derivative of Bias is just the output grad summed along batch 
-        if self.bias is not None:
-            self.bias.grad = output_grad.sum(axis=0, keepdims=True)
-
-        ### We need derivative w.r.t input for the next step 
-        input_grad = output_grad @ self.weight.params.T
-
-        return input_grad
-
-class MSELoss:
+class MSELoss(Operation):
     """
     L = E[(y-y_hat)^2]
     """
@@ -86,8 +168,11 @@ class MSELoss:
         batch_size = self.y_pred.shape[0]
         grad = -(2/batch_size) * (self.y_true - self.y_pred)
         return grad
+    
+    def __repr__(self):
+        return "MSELoss()"
 
-class SLOW_SoftMax:
+class SLOW_SoftMax(Operation):
     """
     Softmax normalization to convert logits -> probabilities
     Backward explicitly computes the jacobian for each sample
@@ -111,7 +196,10 @@ class SLOW_SoftMax:
        
         return gradient
 
-class SoftMax:
+    def __repr__(self):
+        return "SLOW_SoftMax()"
+
+class SoftMax(Operation):
     """
     Softmax normalization to convert logits -> probabilities
     Backward vectorizes gradient computation
@@ -127,8 +215,11 @@ class SoftMax:
         dot_product = np.sum(output_grad * self.probs, axis=-1, keepdims=True)
         gradient = self.probs * (output_grad - dot_product)
         return gradient
-    
-class SLOW_CrossEntropyLoss:
+
+    def __repr__(self):
+        return "SoftMax()"
+
+class SLOW_CrossEntropyLoss(Operation):
     """
     Cross Entropy Loss that assumes inputs are probabilities (already softmaxed).
     Targets are integer class indices (no one-hot).
@@ -158,8 +249,11 @@ class SLOW_CrossEntropyLoss:
         # Only the correct class contributes to loss: -y_i / p_c
         grad[np.arange(batch_size), self.y_true] = -1 / (self.y_pred[np.arange(batch_size), self.y_true] + 1e-12)
         return grad
+    
+    def __repr__(self):
+        return "SLOW_CrossEntropyLoss()"
 
-class CrossEntropyLoss:
+class CrossEntropyLoss(Operation):
     def forward(self, y_true, logits):
         """
         y_true: [batch_size] integer class indices
@@ -187,8 +281,11 @@ class CrossEntropyLoss:
         # subtract 1 at the correct class index
         grad[np.arange(batch_size), self.y_true] -= 1
         return grad
+    
+    def __repr__(self):
+        return "CrossEntropyLoss()"
 
-class Sigmoid:
+class Sigmoid(Operation):
     def forward(self, x):
         self.x = x
         return 1 / (1 + np.exp(-x))
@@ -199,7 +296,10 @@ class Sigmoid:
         input_grad = sigmoid_grad * output_grad
         return input_grad
 
-class ReLU:
+    def __repr__(self):
+        return "Sigmoid()"
+
+class ReLU(Operation):
     def forward(self, x):
         self.x = x
         return np.clip(x, a_min=0, a_max=None)
@@ -208,9 +308,38 @@ class ReLU:
         grad = np.zeros_like(self.x)
         grad[self.x > 0] = 1
         return grad * output_grad
+    
+    def __repr__(self):
+        return "ReLU()"
+    
+class GELU(object):
+    def __init__(self):
+        self.x = None
 
-### SOME CONVOLUTION OPS ###
-class SLOW_Conv2d(Layer):
+    def forward(self, x):
+        self.x = x
+        # The approximation is used for numerical stability and efficiency
+        y = 0.5 * x * (1 + np.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * np.power(x, 3))))
+        return y
+    
+    def backward(self, output_grad):
+        # Derivative of the approximation
+        tanh_val = np.tanh(np.sqrt(2 / np.pi) * (self.x + 0.044715 * np.power(self.x, 3)))
+        sech_sq_val = 1 - np.power(tanh_val, 2)
+        
+        # This is a part of the derivative of the approximation
+        approx_deriv_part = 0.5 * (1 + tanh_val) + self.x * 0.5 * sech_sq_val * np.sqrt(2 / np.pi) * (1 + 3 * 0.044715 * np.power(self.x, 2))
+        
+        return output_grad * approx_deriv_part
+
+    def __repr__(self):
+        return "GELU()"
+
+#######################################
+### LAYERS FOR CONVOLUTIONAL MODELS ###
+#######################################
+
+class SLOW_Conv2d(GradLayer):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -281,8 +410,13 @@ class SLOW_Conv2d(Layer):
         self.grad_b = grad_b
 
         return grad_x
+
+    def __repr__(self):
+        return (f"SLOW_Conv2d(in_channels={self.in_channels}, out_channels={self.out_channels}, "
+                f"kernel_size={self.kernel_size}, stride={self.stride}, "
+                f"padding={self.padding}, bias={self.bias})")
     
-class Conv2d(Layer):
+class Conv2d(GradLayer):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True):
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -407,7 +541,12 @@ class Conv2d(Layer):
 
         return grad_x
 
-class Dropout(Layer):
+    def __repr__(self):
+        return (f"Conv2d(in_channels={self.in_channels}, out_channels={self.out_channels}, "
+                f"kernel_size={self.kernel_size}, stride={self.stride}, "
+                f"padding={self.padding}, bias={True if self.conv_linear.bias.params is not None else False})")
+
+class Dropout(Operation):
     def __init__(self, p=0.5):
         self.p = p
         self.training = True  # By default, layers are in training mode
@@ -428,8 +567,11 @@ class Dropout(Layer):
             return output_grad * self.mask
         else:
             return output_grad
+        
+    def __repr__(self):
+        return f"Dropout(p={self.p})"
 
-class BatchNorm2d(Layer):
+class BatchNorm2d(GradLayer):
     def __init__(self, num_features, eps=1e-5, momentum=0.1):
         self.num_features = num_features
         self.eps = eps
@@ -486,14 +628,16 @@ class BatchNorm2d(Layer):
         dx_hat = output_grad * self.gamma.params
         var_eps = self.var + self.eps
 
-        dx = (1. / np.sqrt(var_eps)) * (
-            dx_hat - np.mean(dx_hat, axis=(0,2,3), keepdims=True)
-            - self.x_hat * np.mean(dx_hat * self.x_hat, axis=(0,2,3), keepdims=True)
-        )
+        mean1 = np.mean(dx_hat, axis=(0,2,3), keepdims=True)
+        mean2 = np.mean(dx_hat * self.x_hat, axis=(0,2,3), keepdims=True)
+        dx = (dx_hat - mean1 - self.x_hat*mean2) / np.sqrt(var_eps)
 
         return dx
+    
+    def __repr__(self):
+        return f"BatchNorm2d({self.num_features})"
 
-class Flatten(Layer):
+class Flatten(Operation):
     def forward(self, x):
         self.input_shape = x.shape
         batch_size = x.shape[0]
@@ -501,6 +645,507 @@ class Flatten(Layer):
 
     def backward(self, grad_output):
         return grad_output.reshape(self.input_shape)
+
+    def __repr__(self):
+        return "Flatten()"
+
+###############################
+### LAYERS FOR TRANSFORMERS ###
+###############################
+
+class Embedding(GradLayer):
+    def __init__(self, vocab_size, embed_dim):
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
+
+        k = 1 / embed_dim
+        self.weight = GradTensor(
+            np.random.uniform(
+                low=-math.sqrt(k),
+                high=math.sqrt(k),
+                size=(vocab_size, embed_dim)
+            )
+        )
+    
+    def forward(self, x):
+        """
+        This just indexes our embedding matrix
+        """
+        self.x = x
+        return self.weight.params[x]
+    
+    def backward(self, output_grad):
+
+        """
+        add.at is a nice method that will accumulate repeated
+        indexes at their positions:
+
+        Example:
+
+            weight_grad = np.zeros((vocab_size, embed_dim))
+            x = np.array([0, 2, 0, 3])          # token indices
+            output_grad = np.array([[1,1,1],
+                                    [2,2,2],
+                                    [3,3,3],
+                                    [4,4,4]])     # gradient from loss
+
+            np.add.at(weight_grad, x, output_grad)
+            print(weight_grad)
+
+            [[4. 4. 4.]
+            [0. 0. 0.]
+            [2. 2. 2.]
+            [4. 4. 4.]
+            [0. 0. 0.]]
+
+        """
+        
+        ### Initialize Gradients on Weights as Zeros ###
+        self.weight.grad = np.zeros_like(self.weight.params)
+        
+        ### Accumulate Gradients at the Cooresponding Indexes ###
+        np.add.at(self.weight.grad, self.x, output_grad)
+
+        return None
+
+    def __repr__(self):
+        return f"Embedding(vocab_size={self.vocab_size}, embed_dim={self.embed_dim})"
+
+class PositionalEmbeddings(GradLayer):
+    """
+    Learnable positional embeddings added to token embeddings.
+    """
+    def __init__(self, max_seq_len, embed_dim):
+        self.max_seq_len = max_seq_len
+        self.embed_dim = embed_dim
+
+        # Learnable positional embeddings
+        self.weight = GradTensor(
+            np.random.randn(max_seq_len, embed_dim).astype(np.float32) * 0.01
+        )
+
+    def forward(self, x):
+        """
+        x: (batch_size, seq_len, embed_dim)
+        Returns x + positional embeddings
+        """
+        self.seq_len = x.shape[1]
+        self.x = x
+
+        # Add positional embeddings (broadcast along batch dimension)
+        return x + self.weight.params[:self.seq_len][None, :, :]
+
+    def backward(self, output_grad):
+        """
+        Gradient flows through both token embeddings (x) and positional embeddings (weight)
+        """
+        # Gradient w.r.t. positional embeddings
+        self.weight.grad = np.zeros_like(self.weight.params)
+        np.add.at(self.weight.grad, np.arange(self.seq_len), output_grad.sum(axis=0))
+
+        # Gradient w.r.t. input x
+        return output_grad
+    
+    def __repr__(self):
+        return f"PositionalEmbeddings(max_seq_len={self.max_seq_len}"
+
+class LayerNorm(GradLayer):
+    def __init__(self, num_features, eps=1e-5):
+        self.num_features = num_features
+        self.eps = eps
+        self.gamma = GradTensor(np.ones(self.num_features))
+        self.beta = GradTensor(np.zeros(self.num_features))
+
+    def forward(self, x):
+        """
+        Forward pass.
+        Args:
+            x: input of shape (B, S, E)
+        Returns:
+            out: normalized and affine-transformed output
+        """
+        self.x = x  # save input
+   
+        # Compute mean and variance across features (axis=-1)
+        self.mean = np.mean(x, axis=-1, keepdims=True)   # shape (B, S, 1)
+        self.var  = np.var(x, axis=-1, keepdims=True)    # shape (B, S, 1)
+
+        # Normalize
+        self.x_hat = (x - self.mean) / np.sqrt(self.var + self.eps)
+
+        # Scale and shift
+        out = self.gamma.params * self.x_hat + self.beta.params
+
+        return out
+    
+    def backward(self, output_grad):
+
+        # Gradient w.r.t gamma and beta (affine transform)
+        self.gamma.grad = np.sum(output_grad * self.x_hat, axis=(0, 1))
+        self.beta.grad  = np.sum(output_grad, axis=(0, 1))              
+
+        # Gradient w.r.t normalized input
+        dx_hat = output_grad * self.gamma.params  # (B, S, E)
+        var_eps = self.var + self.eps
+
+        # LayerNorm backward formula (vectorized)
+        mean1 = np.mean(dx_hat, axis=-1, keepdims=True)
+        mean2 = np.mean(dx_hat * self.x_hat, axis=-1, keepdims=True)
+        dx = (dx_hat - mean1 - self.x_hat * mean2) / np.sqrt(var_eps)
+
+        return dx
+
+# class MultiHeadAttention(GradLayer):
+#     def __init__(self, embed_dim, num_heads):
+#         self.embed_dim = embed_dim
+#         self.num_heads = num_heads
+#         self.head_dim = embed_dim // num_heads
+
+#         assert self.head_dim * num_heads == embed_dim, "Embed dim must be divisible by num_heads"
+
+#         self.q_linear = Linear(self.embed_dim, self.embed_dim)
+#         self.k_linear = Linear(self.embed_dim, self.embed_dim)
+#         self.v_linear = Linear(self.embed_dim, self.embed_dim)
+#         self.out_proj = Linear(self.embed_dim, self.embed_dim)
+#         self.softmax = SoftMax()
+
+#     def forward(self, x, attention_mask=None):
+
+#         batch_size, seq_len, embed_dim = x.shape
+
+#         ### Flatten x from (B x S x E) -> (B*S x E) as my linear doesnt support multidimensions
+#         x = x.reshape(batch_size * seq_len, embed_dim)
+
+#         ### Linear Projections ###
+#         q = self.q_linear.forward(x)
+#         k = self.k_linear.forward(x)
+#         v = self.v_linear.forward(x)
+
+#         ### Reshape for MultiHead Attention ###
+#         q = q.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0,2,1,3)
+#         k = k.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0,2,1,3)
+#         v = v.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0,2,1,3)
+
+#         ### Attention ###
+#         scores = np.matmul(q, k.transpose(0,1,3,2)) / math.sqrt(self.head_dim)
+
+#         ### Attention Mask ###
+#         if attention_mask is not None:
+#             scores += attention_mask
+        
+#         ### Reshape for Softmax ###
+#         scores_reshaped = scores.reshape(batch_size * self.num_heads, seq_len, seq_len)
+#         probs = self.softmax.forward(scores_reshaped)
+#         probs = probs.reshape(batch_size, self.num_heads, seq_len, seq_len)
+
+#         ### Store for Backwards ###
+#         self.q = q
+#         self.k = k
+#         self.v = v
+#         self.probs = probs
+
+#         ### Attention Output ###
+#         attn = np.matmul(probs, v)
+
+#         ### Concat Heads ###
+#         attn = attn.transpose(0,2,1,3).reshape(batch_size, seq_len, self.embed_dim)
+
+#         ### Reshape for Final Linear Layer ###
+#         attn_flat = attn.reshape(batch_size*seq_len, self.embed_dim)
+#         out = self.out_proj.forward(attn_flat)
+#         out = out.reshape(batch_size, seq_len, self.embed_dim)
+
+#         return out
+            
+#     def backward(self, output_grad):
+
+#         ### Input shape and output shape of transformer identical ###
+#         batch_size, seq_len, embed_dim = output_grad.shape
+
+#         ### Backward through out_proj layer (flatten as that how we passed to the layer in forward) ###
+#         output_grad_flat = output_grad.reshape(batch_size*seq_len, self.embed_dim)
+#         grad_attn_flat = self.out_proj.backward(output_grad_flat)
+#         grad_attn = grad_attn_flat.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+
+#         ### Backward through attn = probs @ v ###
+#         ### If Y = XW, dL/dW = X^T(dL/dY) and dL/dX = (dL/dY)W^T ###
+#         ### This was how our linear layer worked, the same idea applied here! ###
+#         grad_v = np.matmul(self.probs.transpose(0,1,3,2), grad_attn)
+#         grad_probs = np.matmul(grad_attn, self.v.transpose(0,1,3,2))
+
+#         ### Backward through Softmax ###
+#         grad_probs_reshaped = grad_probs.reshape(batch_size * self.num_heads, seq_len, seq_len)
+#         grad_scores_reshaped = self.softmax.backward(grad_probs_reshaped)
+#         grad_scores = grad_scores_reshaped.reshape(batch_size, self.num_heads, seq_len, seq_len)
+
+#         ### Backward through Scaling ###
+#         grad_scores /= math.sqrt(self.head_dim)
+
+#         ### Backward through scores = q @ k.T ###
+#         ### Just like before lets first do dL/dQ = dL/dS (k^T)^T = dL/dS (k) ###
+#         grad_q = np.matmul(grad_scores, self.k)
+#         ### dL/dK^T = Q^T dL/dS, but we need in terms of dL/dK to continue backprop ###
+#         ### to get our shapes correct. So dL/dK = [Q^T dL/dS]^T = (dL/dS)^T Q ###
+#         grad_k = np.matmul(grad_scores.transpose(0,1,3,2), self.q)
+
+#         ### Transpose Back and Flatten Head Dim and Num Heads ###
+#         grad_q = grad_q.transpose(0,2,1,3).reshape(batch_size, seq_len, self.embed_dim)
+#         grad_k = grad_k.transpose(0,2,1,3).reshape(batch_size, seq_len, self.embed_dim)
+#         grad_v = grad_v.transpose(0,2,1,3).reshape(batch_size, seq_len, self.embed_dim)
+
+#         ### Reshape for Linear Layer Backward ###
+#         grad_q_flat = grad_q.reshape(batch_size * seq_len, self.embed_dim)
+#         grad_k_flat = grad_k.reshape(batch_size * seq_len, self.embed_dim)
+#         grad_v_flat = grad_v.reshape(batch_size * seq_len, self.embed_dim)
+
+#         ### Backward through Linear Layers ###
+#         grad_query = self.q_linear.backward(grad_q_flat)
+#         grad_key = self.k_linear.backward(grad_k_flat)
+#         grad_value = self.v_linear.backward(grad_v_flat)
+
+#         ### Reshape Back to (B x S x E) ###
+#         grad_query = grad_query.reshape(batch_size, seq_len, self.embed_dim)
+#         grad_key = grad_key.reshape(batch_size, seq_len, self.embed_dim)
+#         grad_value = grad_value.reshape(batch_size, seq_len, self.embed_dim)
+
+#         ### Total up Gradients ###
+#         return grad_query + grad_key + grad_value
+
+class MultiHeadAttention(GradLayer):
+    """
+    Multi-Head Self-Attention.
+    """
+    def __init__(self, embed_dim, num_heads):
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+        
+        self.q_linear = Linear(self.embed_dim, self.embed_dim)
+        self.k_linear = Linear(self.embed_dim, self.embed_dim)
+        self.v_linear = Linear(self.embed_dim, self.embed_dim)
+        self.out_linear = Linear(self.embed_dim, self.embed_dim)
+        self.softmax = SoftMax()
+
+    def forward(self, x, attention_mask=None):
+        """
+        For self-attention, query = key = value = x (batch_size, seq_len, embed_dim)
+        mask: optional (batch_size, 1, seq_len, seq_len) with -inf where masked, 0 otherwise.
+        """
+        batch_size, seq_len, _ = x.shape
+        
+        # Reshape for linear layers: (batch_size * seq_len, embed_dim)
+        query_flat = x.reshape(batch_size * seq_len, self.embed_dim)
+        key_flat = x.reshape(batch_size * seq_len, self.embed_dim)
+        value_flat = x.reshape(batch_size * seq_len, self.embed_dim)
+        
+        # Linear projections
+        q = self.q_linear.forward(query_flat)
+        k = self.k_linear.forward(key_flat)
+        v = self.v_linear.forward(value_flat)
+        
+        # Reshape back to (batch_size, seq_len, embed_dim) then to heads
+        q = q.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        k = k.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        v = v.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        
+        # Scaled dot-product attention
+        scores = np.matmul(q, k.transpose(0, 1, 3, 2)) / math.sqrt(self.head_dim)
+        
+        if attention_mask is not None:
+            scores += attention_mask
+        
+        # Apply softmax
+        scores_reshaped = scores.reshape(batch_size * self.num_heads, seq_len, seq_len)
+        probs = self.softmax.forward(scores_reshaped)
+        probs = probs.reshape(batch_size, self.num_heads, seq_len, seq_len)
+        
+        self.probs = probs
+        self.q = q
+        self.k = k
+        self.v = v
+        
+        # Attention output
+        attn = np.matmul(probs, v)
+        
+        # Concat heads: (batch, seq, embed_dim)
+        attn = attn.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
+        
+        # Reshape for out_linear
+        attn_flat = attn.reshape(batch_size * seq_len, self.embed_dim)
+        out = self.out_linear.forward(attn_flat)
+        out = out.reshape(batch_size, seq_len, self.embed_dim)
+        
+        return out
+
+    def backward(self, output_grad):
+        """
+        Backward through multi-head attention.
+        Returns grad w.r.t. query, but since self-attn assumes query=key=value, we sum gradients.
+        """
+        batch_size, seq_len, _ = output_grad.shape
+        
+        # Back through out_linear
+        output_grad_flat = output_grad.reshape(batch_size * seq_len, self.embed_dim)
+        grad_attn_flat = self.out_linear.backward(output_grad_flat)
+        grad_attn = grad_attn_flat.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        
+        ### Backward through attn = probs @ v ###
+        ### If Y = XW, dL/dW = X^T(dL/dY) and dL/dX = (dL/dY)W^T ###
+        ### This was how our linear layer worked, the same idea applied here! ###
+        grad_probs = np.matmul(grad_attn, self.v.transpose(0, 1, 3, 2))
+        grad_v = np.matmul(self.probs.transpose(0, 1, 3, 2), grad_attn)
+        
+        # Back through softmax
+        grad_probs_reshaped = grad_probs.reshape(batch_size * self.num_heads, seq_len, seq_len)
+        grad_scores_reshaped = self.softmax.backward(grad_probs_reshaped)
+        grad_scores = grad_scores_reshaped.reshape(batch_size, self.num_heads, seq_len, seq_len)
+        
+        # Back through scaling
+        grad_scores /= math.sqrt(self.head_dim)
+        
+        ### Backward through scores = q @ k.T ###
+        ### Just like before lets first do dL/dQ = dL/dS (k^T)^T = dL/dS (k) ###
+        grad_q = np.matmul(grad_scores, self.k)
+        ### dL/dK^T = Q^T dL/dS, but we need in terms of dL/dK to continue backprop ###
+        ### to get our shapes correct. So dL/dK = [Q^T dL/dS]^T = (dL/dS)^T Q ###
+        grad_k = np.matmul(grad_scores.transpose(0, 1, 3, 2), self.q)
+        
+        # Transpose back
+        grad_q = grad_q.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
+        grad_k = grad_k.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
+        grad_v = grad_v.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, self.embed_dim)
+        
+        # Reshape for linear layers
+        grad_q_flat = grad_q.reshape(batch_size * seq_len, self.embed_dim)
+        grad_k_flat = grad_k.reshape(batch_size * seq_len, self.embed_dim)
+        grad_v_flat = grad_v.reshape(batch_size * seq_len, self.embed_dim)
+        
+        # Back through linears
+        grad_query = self.q_linear.backward(grad_q_flat)
+        grad_key = self.k_linear.backward(grad_k_flat)
+        grad_value = self.v_linear.backward(grad_v_flat)
+        
+        # Reshape back to (batch_size, seq_len, embed_dim)
+        grad_query = grad_query.reshape(batch_size, seq_len, self.embed_dim)
+        grad_key = grad_key.reshape(batch_size, seq_len, self.embed_dim)
+        grad_value = grad_value.reshape(batch_size, seq_len, self.embed_dim)
+        
+        return grad_query + grad_key + grad_value
+
+class FFN(GradLayer):
+
+    def __init__(self, embed_dim, dim_mult=4):
+
+        self.linear1 = Linear(embed_dim, embed_dim*dim_mult)
+        self.gelu = GELU()
+        self.linear2 = Linear(embed_dim*dim_mult, embed_dim)
+    
+    def forward(self, x):
+
+        batch_size, seq_len, embed_dim = x.shape
+        
+        ### Flatten x from (B x S x E) -> (B*S x E) as my linear doesnt support multidimensions
+        x_flat = x.reshape(batch_size*seq_len, embed_dim)
+        x_flat = self.linear1.forward(x_flat)
+        x_flat = self.gelu.forward(x_flat)
+        x_flat = self.linear2.forward(x_flat)
+        
+        ### Reshape X back ###
+        x = x_flat.reshape(batch_size, seq_len, embed_dim)
+
+        return x
+    
+    def backward(self, output_grad):
+
+        batch_size, seq_len, embed_dim = output_grad.shape
+
+        ### Flatten output_grad back to (B*S, E) shape ###
+        output_grad_flat = output_grad.reshape(batch_size*seq_len, embed_dim)
+
+        ### Compute Backward Grads ###
+        output_grad_flat = self.linear2.backward(output_grad_flat)
+        output_grad_flat = self.gelu.backward(output_grad_flat)
+        output_grad_flat = self.linear1.backward(output_grad_flat)
+
+        ### Reshape Back ###
+        grad = output_grad_flat.reshape(batch_size, seq_len, embed_dim)
+
+        return grad
+
+class TransformerBlock(GradLayer):
+    def __init__(self, embed_dim, num_heads, dropout_p, dim_mult):
+
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.dropout_p = dropout_p
+        self.dim_mult = dim_mult
+
+        self.attention = MultiHeadAttention(embed_dim, num_heads)
+        self.ff = FFN(embed_dim, dim_mult)
+        self.norm1 = LayerNorm(embed_dim)
+        self.norm2 = LayerNorm(embed_dim)
+        self.dropout1 = Dropout(dropout_p)
+        self.dropout2 = Dropout(dropout_p)
+
+    def forward(self, x, attention_mask=None):
+
+        ### Attention + Residual and LayerNorm ###
+        attn = self.attention.forward(x, attention_mask)
+        attn = self.dropout1.forward(attn)
+        x = x + attn
+        x = self.norm1.forward(x)
+
+        ### Feedforward + Residual and LayerNorm ###
+        ff_out = self.ff.forward(x)
+        ff_out = self.dropout2.forward(ff_out)
+        x = x + ff_out
+        x = self.norm2.forward(x)
+
+        return x
+    
+    def backward(self, output_grad):
+
+        ### Backward through LayerNorm2 (This is our grad for residual) ###
+        grad = self.norm2.backward(output_grad)
+
+        ### Backward through Dropout2 ###
+        grad_drop = self.dropout2.backward(grad)
+
+        ### Backward through FeedForward ###
+        grad_ff = self.ff.backward(grad_drop)
+
+        ### Add Residual Gradient ###
+        grad = grad + grad_ff
+
+        ### Backward through Layernorm1 (This is our grad for residual) ###
+        grad = self.norm1.backward(grad)
+
+        ### Backward through Dropout1 ###
+        grad_drop = self.dropout1.backward(grad)
+
+        ### Backward through Attention ###
+        grad_attn = self.attention.backward(grad_drop)
+
+        ### Residual Connection ###
+        grad = grad + grad_attn
+
+        return grad
+    
+    def __repr__(self):
+        return f"TransformerBlock(embed_dim={self.embed_dim}, num_heads={self.num_heads}, dropout_p={self.dropout_p}, dim_mult={self.dim_mult})"
+
+class FlattenForLLM(Operation):
+    def forward(self, x):
+        self.input_shape = x.shape
+        batch_size, seq_len, embed_dim = self.input_shape
+        return x.reshape(batch_size*seq_len, embed_dim)
+
+    def backward(self, grad_output):
+        return grad_output.reshape(self.input_shape)
+
+    def __repr__(self):
+        return "FlattenForLLM()"
 
 class NeuralNetwork:
     """
@@ -515,9 +1160,17 @@ class NeuralNetwork:
     def __call__(self, input):
         return self.forward(input)
     
-    def forward(self, input):
+    # def forward(self, input):
+    #     for layer in self.layers:
+    #         input = layer.forward(input)
+    #     return input
+
+    def forward(self, input, attention_mask=None):
         for layer in self.layers:
-            input = layer.forward(input)
+            if isinstance(layer, TransformerBlock):
+                input = layer.forward(input, attention_mask)
+            else:
+                input = layer.forward(input)
         return input
 
     def backward(self, output_grad):
@@ -525,92 +1178,37 @@ class NeuralNetwork:
             output_grad = layer.backward(output_grad)
 
     def parameters(self):
-        parameters = []
+        params = []
         for layer in self.layers:
-            # General Layer
-            if hasattr(layer, 'weight'):
-                parameters.append(layer.weight)
-            if hasattr(layer, 'bias') and layer.bias is not None:
-                parameters.append(layer.bias)
-            
-            # Conv2d layer which uses a linear internally
-            if hasattr(layer, 'conv_linear'):
-                if hasattr(layer.conv_linear, 'weight'):
-                    parameters.append(layer.conv_linear.weight)
-                if hasattr(layer.conv_linear, 'bias') and layer.conv_linear.bias is not None:
-                    parameters.append(layer.conv_linear.bias)
-            
-            # BatchNorm layer
-            if hasattr(layer, 'gamma'):
-                parameters.append(layer.gamma)
-            if hasattr(layer, 'beta'):
-                parameters.append(layer.beta)
-            
-            # Composite layers like TransformerLayer
-            if hasattr(layer, 'parameters'):
-                parameters.extend(layer.parameters())
-
-        return parameters
-    
-    def named_parameters(self):
-        named_params = []
-        for idx, layer in enumerate(self.layers):
-            layer_name = f"layer_{idx}_{layer.__class__.__name__}"
-            
-            # Linear layer
-            if hasattr(layer, 'weight'):
-                named_params.append((f"{layer_name}.weight", layer.weight))
-            if hasattr(layer, 'bias') and layer.bias is not None:
-                named_params.append((f"{layer_name}.bias", layer.bias))
-            
-            # Conv2d layer
-            if hasattr(layer, 'conv_linear'):
-                if hasattr(layer.conv_linear, 'weight'):
-                    named_params.append((f"{layer_name}.conv_linear.weight", layer.conv_linear.weight))
-                if hasattr(layer.conv_linear, 'bias') and layer.conv_linear.bias is not None:
-                    named_params.append((f"{layer_name}.conv_linear.bias", layer.conv_linear.bias))
-            
-            # BatchNorm layer
-            if hasattr(layer, 'gamma'):
-                named_params.append((f"{layer_name}.gamma", layer.gamma))
-            if hasattr(layer, 'beta'):
-                named_params.append((f"{layer_name}.beta", layer.beta))
-            
-        return named_params
+            if isinstance(layer, GradLayer):
+                layer_parameters = layer.parameters()
+                params.extend(layer_parameters)
+        return params
     
     def train(self):
         """Set network to training mode."""
         self.training = True
         for layer in self.layers:
-            if hasattr(layer, 'training'):
-                layer.training = True
+            self._set_mode_recursive(layer, True)
 
     def eval(self):
         """Set network to evaluation mode."""
         self.training = False
         for layer in self.layers:
-            if hasattr(layer, 'training'):
-                layer.training = False
+            self._set_mode_recursive(layer, False)
+    
+    def _set_mode_recursive(self, layer, mode):
+        if hasattr(layer, "training"):
+            layer.training = mode
+        if isinstance(layer, (GradLayer, Operation)):
+            for attr_name, attr_value in layer.__dict__.items():
+                if isinstance(attr_value, (GradLayer, Operation)):
+                    self._set_mode_recursive(attr_value, mode)
 
     def __repr__(self):
         model_repr = "NeuralNetwork(\n"
-        
         for layer in self.layers:
-            if isinstance(layer, Linear):
-                model_repr += f"  Linear(in_features={layer.in_features}, out_features={layer.out_features}, bias={layer.bias is not None})\n"
-            elif isinstance(layer, Sigmoid):
-                model_repr += "  Sigmoid()\n"
-            elif isinstance(layer, ReLU):
-                model_repr += "  ReLU()\n"
-            elif isinstance(layer, SLOW_SoftMax): 
-                model_repr += " SLOW_Softmax()\n"
-            elif isinstance(layer, SoftMax):
-                model_repr += "  SoftMax()\n"
-            elif isinstance(layer, Flatten):
-                model_repr += "  Flatten()\n"
-            elif isinstance(layer, Conv2d):
-                model_repr += (f"  Conv2D(in_channels={layer.in_channels}, out_channels={layer.out_channels}, "
-                               f"kernel_size={layer.kernel_size}, stride={layer.stride}, padding={layer.padding})\n")
+            model_repr += f"  {repr(layer)}\n"
         model_repr += ")"
         return model_repr
     
