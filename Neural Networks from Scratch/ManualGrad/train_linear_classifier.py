@@ -37,7 +37,7 @@ testloader = DataLoader(test_dataset, batch_size=32, collate_fn=collate_fn)
 loss_func = nn.CrossEntropyLoss()
 optimizer = optim.Adam(network.parameters(), lr=1e-3)
 
-training_iterations = 2500
+training_iterations = 1000
 
 all_train_losses = []
 all_train_accs = []
@@ -124,3 +124,14 @@ while train:
             print("Completed Training")
             train = False
             break
+
+
+network.save("work_dir/linear_mnist.pkl")
+network.load("work_dir/linear_mnist.pkl")
+
+### Inferencing Model ###
+image, label = next(iter(test_dataset))
+image = np.array(image).flatten().reshape(1,784)
+output = network(image)
+print("Predicted Label:", output[0].argmax(axis=-1))
+print("True Label:", label)

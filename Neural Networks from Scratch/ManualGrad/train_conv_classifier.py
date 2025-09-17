@@ -71,6 +71,7 @@ def collate_fn(batch):
 trainloader = DataLoader(train_dataset, batch_size=32, collate_fn=collate_fn)
 testloader = DataLoader(test_dataset, batch_size=32, collate_fn=collate_fn)
 loss_func = nn.CrossEntropyLoss()
+
 optimizer = optim.Adam(network.parameters(), lr=5e-4)
 
 training_iterations = 10000
@@ -152,7 +153,6 @@ while train:
             test_losses = []
             test_accs = []
 
-        
         num_iters += 1
         pbar.update(1)
 

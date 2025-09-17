@@ -1,7 +1,9 @@
+"""
+Training a tiny GPT type model very close to the MinGPT implementation from Karpathy!
+https://github.com/karpathy/minGPT
+"""
 import cupy as np ### USING NP NOTATION BUT CUPY ALMOST IDENTICAL TO NUMPY
 from tqdm import tqdm
-from torchvision.datasets import CIFAR10
-from torch.utils.data import DataLoader
 import requests
 from tqdm import tqdm
 
@@ -17,7 +19,6 @@ chars = sorted(list(set(text)))
 vocab_size = len(chars)
 char_to_idx = {ch: i for i, ch in enumerate(chars)}
 idx_to_char = {i: ch for i, ch in enumerate(chars)}
-
 data = np.array([char_to_idx[ch] for ch in text])
 
 # 3. Batch generation
@@ -40,15 +41,15 @@ model.add(nn.TransformerBlock(embed_dim=384, num_heads=6, dropout_p=0.1, dim_mul
 model.add(nn.FlattenForLLM())
 model.add(nn.Linear(in_features=384, out_features=vocab_size))
 
-seq_len = 128
+seq_len = 256
 causal_mask = np.triu(np.ones((1, 1, seq_len, seq_len)) * -1e9, k=1)
 loss_fn = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.0003)
+optimizer = optim.Adam(model.parameters(), lr=0.0002)
 
 # 5. Training loop
 model.train()
 train_iterations = 5000
-batch_size = 32
+batch_size = 64
 
 for epoch in tqdm(range(train_iterations)):
     inputs, targets = get_batch(data, batch_size, seq_len)
@@ -68,12 +69,15 @@ for epoch in tqdm(range(train_iterations)):
         
         print(f"Epoch {epoch}, Loss: {loss:.4f}, Accuracy: {accuracy:.2f}%")
 
+model.save("work_dir/character_transformer.pkl")
+model.load("work_dir/character_transformer.pkl")
+
 print("Inferencing")
 model.eval()
 seed = np.array([[char_to_idx['h']]])  # starting character
 generated = [seed.item()]
 
-for _ in range(128):
+for _ in range(seq_len):
     curr_len = seed.shape[1]
     causal_mask = np.triu(np.ones((1, 1, curr_len, curr_len)) * -1e9, k=1)
 
