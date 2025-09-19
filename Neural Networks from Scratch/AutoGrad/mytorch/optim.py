@@ -32,12 +32,12 @@ class Adam:
 
         ### Step Index for Bias Correction ###
         self.t = 0
-
+        
     def step(self):
 
         self.t += 1
-
         for i, param in enumerate(self.parameters):
+
             if param.requires_grad:
             
                 self.m[i] = self.beta1 * self.m[i] + (1 - self.beta1) * param.grad

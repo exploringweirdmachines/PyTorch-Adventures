@@ -73,6 +73,7 @@ class Attention(nn.Module):
         
         ### Compute Attention (Attention Mask has shape Batch x Sequence len x Sequence len) ###
         scores = (q @ k.transpose(-2, -1)) / self.head_dim**0.5
+        scores = scores.astype(cp.float32)
 
         ### Add attention mask if it exists ###
         if attention_mask is not None:
@@ -83,21 +84,20 @@ class Attention(nn.Module):
 
         output = attention @ v
         output = output.transpose(1,2).reshape(batch*seq_len, embed_dim)
-
+        
         ### Compute Output Projection (on flattened dimension) ###
         output = self.out_proj(output)
         output = self.proj_drop(output)
 
         output = output.reshape(batch, seq_len, embed_dim)
-
+        
         return output
     
-class RobertaFeedForward(nn.Module):
+class FeedForward(nn.Module):
     """
     Regular MLP module after our attention computation. 
     """
     def __init__(self, embed_dim, mlp_ratio=4, mlp_dropout_p=0.1):
-        super(RobertaFeedForward, self).__init__()
         
         hidden_size = embed_dim * mlp_ratio
         self.intermediate_dense = nn.Linear(embed_dim, hidden_size)
@@ -130,7 +130,7 @@ class TransformerBlock(nn.Module):
 
         self.attention = Attention(embed_dim, num_heads, dropout_p)
         self.layernorm = nn.LayerNorm(embed_dim)
-        self.feedforward = RobertaFeedForward(embed_dim, mlp_ratio, dropout_p)
+        self.feedforward = FeedForward(embed_dim, mlp_ratio, dropout_p)
         self.layernorm2 = nn.LayerNorm(embed_dim)
 
     def forward(self, x, attention_mask=None):
@@ -184,6 +184,13 @@ class Transformer(nn.Module):
 
         return x
 
+USE_AUTO_METHDOS = False
+if USE_AUTO_METHDOS:
+    nn.Linear = nn.AutoLinear
+    nn.LayerNorm = nn.AutoLayerNorm
+    nn.ReLU = nn.AutoReLU
+    nn.Softmax = nn.AutoSoftmax
+    nn.CrossEntropyLoss = nn.AutoCrossEntropyLoss
 
 ### Get Dataset ###
 url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
@@ -215,9 +222,9 @@ def get_batch(data, batch_size, seq_len):
     return inputs, targets.flatten()
 
 seq_len = 256
-causal_mask = mytorch.Tensor(cp.triu(np.ones((1, 1, seq_len, seq_len)) * -1e9, k=1))
+causal_mask = mytorch.Tensor(cp.triu(np.ones((1, 1, seq_len, seq_len)) * -1e9, k=1)).astype(cp.float32)
 loss_fn = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.0002)
+optimizer = optim.Adam(model.parameters(), lr=0.0001)
 
 # 5. Training loop
 model.train()
@@ -234,4 +241,4 @@ for epoch in tqdm(range(train_iterations)):
     optimizer.step()
     optimizer.zero_grad()
 
-    print(loss)
+    print(loss.data)

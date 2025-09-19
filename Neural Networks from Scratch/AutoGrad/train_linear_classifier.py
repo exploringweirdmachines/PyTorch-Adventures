@@ -42,7 +42,7 @@ test = MNIST("../../data", train=False, download=True)
 def collate_fn(batch):
 
     ### Prep and Scale Images ###
-    images = cp.concatenate([cp.array(i[0]).reshape(1,784)for i in batch]) / 255
+    images = cp.concatenate([cp.array(i[0]).astype(cp.float32).reshape(1,784)for i in batch]) / 255
 
     ### One Hot Encode Label (MNIST only has 10 classes) ###
     labels = [i[1] for i in batch]
@@ -111,3 +111,4 @@ for epoch in range(10):
     print(f"Eval Loss: {np.mean(eval_loss)}")
     print(f"Training Acc: {np.mean(train_acc)}")
     print(f"Eval Acc: {np.mean(eval_acc)}")
+
