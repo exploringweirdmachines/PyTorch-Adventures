@@ -1,7 +1,6 @@
 import math
 import cupy as cp
 from .tensor import Tensor
-# from tensor import Tensor
 
 ######################
 ### Generic Module ###
@@ -9,17 +8,15 @@ from .tensor import Tensor
 class Module:
 
     def parameters(self):
-        params = []
         for val in self.__dict__.values():
             if isinstance(val, Tensor):
-                params.append(val)
+                yield val
             elif isinstance(val, Module):
-                params.extend(val.parameters())
+                yield from val.parameters()
             elif isinstance(val, list):
                 for item in val:
                     if isinstance(item, Module):
-                        params.extend(item.parameters())
-        return params
+                        yield from item.parameters()
     
     def named_parameters(self, prefix=""):
         for name, val in self.__dict__.items():
@@ -33,10 +30,40 @@ class Module:
                 for i, item in enumerate(val):
                     if isinstance(item, Module):
                         sub_prefix = f"{prefix}{name}.{i}" if prefix else f"{name}.{i}"
-                        yield from item.named_parameters(sub_prefix)
+                        yield from item.named_parameters(sub_prefix)    
 
+    def state_dict(self):
+        """
+        Returns a dictionary of all parameters as NumPy arrays (CPU-friendly).
+        """
+        return {name: cp.asnumpy(tensor.data) for name, tensor in self.named_parameters()}
 
-    
+    def load_state_dict(self, state_dict, strict=True):
+        """
+        Loads parameters from a state_dict (NumPy arrays), converting to CuPy.
+        """
+        missing_keys = []
+        unexpected_keys = list(state_dict.keys())
+
+        for name, param in self.named_parameters():
+            if name in state_dict:
+                # Convert NumPy array to CuPy and copy into Tensor
+                param.data[:] = cp.asarray(state_dict[name], dtype=cp.float32)
+                unexpected_keys.remove(name)
+            else:
+                missing_keys.append(name)
+
+        if strict:
+            error_msgs = []
+            if missing_keys:
+                error_msgs.append(f"Missing keys: {missing_keys}")
+            if unexpected_keys:
+                error_msgs.append(f"Unexpected keys: {unexpected_keys}")
+            if error_msgs:
+                raise RuntimeError("Error(s) in loading state_dict:\n" + "\n".join(error_msgs))
+            else:
+                print("<All Keys Matched Successfully>")
+            
     # def parameters(self):
     #     params = []
     #     for val in self.__dict__.values():
@@ -112,6 +139,9 @@ class Module:
                 for child in val:
                     child._set_training_mode(mode)
 
+###############################
+### STACK MODULES INTO LIST ###
+###############################
 class ModuleList(Module):
     def __init__(self, modules=None):
         super().__init__()
@@ -143,17 +173,7 @@ class ModuleList(Module):
         out += "])"
         return out
 
-#######################
-### Random sampling ###
-#######################
-def rand(shape, low=0.0, high=1.0, dtype=cp.float32):
-    return Tensor(cp.random.uniform(low, high, size=shape).astype(dtype))
 
-def randn(shape, mean=0.0, std=1.0, dtype=cp.float32):
-    return Tensor(cp.random.normal(mean, std, size=shape).astype(dtype))
-
-def randint(shape, low=0, high=10, dtype=cp.int32):
-    return Tensor(cp.random.randint(low, high, size=shape, dtype=dtype))
 
 ##############
 ### LAYERS ###
@@ -193,7 +213,7 @@ class AutoLinear(Module):
 
 class Linear(Module):
     """
-    Linear layer with manual backward, similar to LayerNorm.
+    Optimized Linear layer with manual backward.
     """
     def __init__(self, in_features, out_features, bias=True):
         self.in_features = in_features
@@ -209,7 +229,7 @@ class Linear(Module):
 
         if self.bias:
             self.b = Tensor(
-                cp.random.uniform(-k, k, size=(1, out_features), dtype=cp.float32),
+                cp.random.uniform(-k, k, size=(out_features,), dtype=cp.float32),
                 requires_grad=True
             )
         else:
@@ -218,33 +238,33 @@ class Linear(Module):
     def __call__(self, x):
         return self.forward(x)
 
+    def __repr__(self):
+        return f"Linear(in_features={self.in_features}, out_features={self.out_features}, bias={self.bias})"
+    
+    def _extra_repr(self):
+        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias}"
+
+
     def forward(self, x: Tensor):
-        x_data = cp.ascontiguousarray(x.data)
-        W_data = cp.ascontiguousarray(self.W.data)
-
-        out_data = x_data @ W_data
-
+        
+        out_data = cp.matmul(x.data, self.W.data)
         if self.bias:
-            b_data = cp.ascontiguousarray(self.b.data)
-            out_data = out_data + b_data
+            out_data += self.b.data 
 
-        # Manual backward
         def _linear_backward(grad_output, child):
-            grad_output = cp.ascontiguousarray(grad_output)
+            if not grad_output.flags.c_contiguous:
+                grad_output = cp.ascontiguousarray(grad_output)
 
-            # Gradient w.r.t weights
             if self.W.requires_grad:
-                grad_W = x_data.T @ grad_output
+                grad_W = cp.matmul(x.data.T, grad_output)
                 self.W.backward(grad_W, child)
 
-            # Gradient w.r.t bias
             if self.bias and self.b.requires_grad:
-                grad_b = cp.sum(grad_output, axis=0, keepdims=True)
+                grad_b = grad_output.sum(axis=0)
                 self.b.backward(grad_b, child)
 
-            # Gradient w.r.t input x
             if x.requires_grad:
-                grad_x = grad_output @ W_data.T
+                grad_x = cp.matmul(grad_output, self.W.data.T)
                 x.backward(grad_x, child)
 
         out = Tensor(
@@ -254,20 +274,12 @@ class Linear(Module):
             grad_fn_name="<LinearBackward>"
         )
 
-        # Add children for autograd graph
         x._add_child(out)
         self.W._add_child(out)
         if self.bias:
             self.b._add_child(out)
 
         return out
-
-    def __repr__(self):
-        return f"Linear(in_features={self.in_features}, out_features={self.out_features}, bias={self.bias})"
-
-    def _extra_repr(self):
-        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias}"
-
 
 class Embedding(Module):
     def __init__(self, num_embeddings, embedding_dim):
@@ -394,7 +406,6 @@ class LayerNorm(Module):
             grad_fn_name="<LayerNormBackward>"
         )
 
-        # Add children
         x._add_child(out)
         self.gamma._add_child(out)
         self.beta._add_child(out)
@@ -407,11 +418,10 @@ class LayerNorm(Module):
     def _extra_repr(self):
         return f"{self.embed_dim}"
     
-
 ############################
 ### Activation Functions ###
 ############################
-class Sigmoid:
+class AutoSigmoid:
     def __init__(self):
         pass
 
@@ -423,6 +433,36 @@ class Sigmoid:
     
     def forward(self, x):
         return 1 / (1 + (-x).exp())
+
+class Sigmoid:
+    def __init__(self):
+        pass
+
+    def __repr__(self):
+        return "Sigmoid()"
+    
+    def __call__(self, x):
+        return self.forward(x)
+    
+    def forward(self, x):
+
+        out_data = 1 / (1 + cp.exp(-x.data))
+        
+        def _sigmoid_backward(grad_output, child):
+            grad_input = grad_output * out_data * (1 - out_data)
+            x.backward(grad_input)
+
+        out = Tensor(
+            out_data,
+            requires_grad=x.requires_grad,
+            grad_fn=_sigmoid_backward,
+            grad_fn_name="<SigmoidBackward>"
+        )
+
+        # Connect to autograd graph
+        x._add_child(out)
+
+        return out
 
 class AutoReLU:
     def __init__(self):
@@ -443,7 +483,7 @@ class AutoReLU:
     
 class ReLU(Module):
     """
-    Optimized ReLU with manual backward and contiguous memory.
+    ReLU with manual backward using CuPy ops.
     """
     def __init__(self):
         pass
@@ -452,15 +492,11 @@ class ReLU(Module):
         return self.forward(x)
 
     def forward(self, x):
-        x_data = cp.ascontiguousarray(x.data)
-        mask = x_data > 0  # boolean mask
-        mask = cp.ascontiguousarray(mask.astype(cp.float32))
+ 
+        mask = (x.data > 0).astype(cp.float32)
+        out_data = x.data * mask
 
-        out_data = x_data * mask
-
-        # Manual backward
         def _relu_backward(grad_output, child):
-            grad_output = cp.ascontiguousarray(grad_output)
             grad_input = grad_output * mask
             x.backward(grad_input, child)
 
@@ -471,13 +507,59 @@ class ReLU(Module):
             grad_fn_name="<ReLUBackward>"
         )
 
-        # Add child for autograd
         x._add_child(out)
 
         return out
 
     def __repr__(self):
         return "ReLU()"
+    
+class GELU(Module):
+    """
+    GELU activation with manual backward (approximation).
+    """
+    def __init__(self):
+        pass
+
+    def __repr__(self):
+        return "GELU()"
+    
+    def __call__(self, x):
+        return self.forward(x)
+    
+    def forward(self, x):
+        x_data = cp.ascontiguousarray(x.data)
+
+        # Constants
+        sqrt_2_over_pi = cp.sqrt(2 / cp.pi).astype(cp.float32)
+
+        # tanh approximation
+        inner = sqrt_2_over_pi * (x_data + 0.044715 * cp.power(x_data, 3))
+        tanh_out = cp.tanh(inner)
+        out_data = 0.5 * x_data * (1.0 + tanh_out)
+
+        # Backward
+        def _gelu_backward(grad_output, child):
+            grad_output = cp.ascontiguousarray(grad_output)
+
+            # derivative of GELU approximation
+            sech2 = 1 - cp.power(tanh_out, 2)  # derivative of tanh
+            inner_grad = sqrt_2_over_pi * (1 + 3 * 0.044715 * cp.power(x_data, 2))
+
+            grad_input = 0.5 * (1.0 + tanh_out +
+                                x_data * sech2 * inner_grad) * grad_output
+
+            x.backward(grad_input, child)
+
+        out = Tensor(
+            out_data,
+            requires_grad=x.requires_grad,
+            grad_fn=_gelu_backward,
+            grad_fn_name="<GELUBackward>"
+        )
+
+        x._add_child(out)
+        return out
 
 class AutoSoftmax:
     def __init__(self):
@@ -507,11 +589,10 @@ class Softmax(Module):
     def forward(self, x, dim):
 
         self.dim = dim
-        x_data = cp.ascontiguousarray(x.data)
 
         # Numerical stability: subtract max along dim
-        max_val = cp.max(x_data, axis=self.dim, keepdims=True)
-        shifted = x_data - max_val
+        max_val = cp.max(x.data, axis=self.dim, keepdims=True)
+        shifted = x.data - max_val
         exp_x = cp.exp(shifted)
         sum_exp = cp.sum(exp_x, axis=self.dim, keepdims=True)
         out_data = exp_x / sum_exp
@@ -655,6 +736,3 @@ class MSELoss:
     
     def forward(self, pred, labels):
         return ((pred-labels)**2).mean(dim=0)
-
-
-
