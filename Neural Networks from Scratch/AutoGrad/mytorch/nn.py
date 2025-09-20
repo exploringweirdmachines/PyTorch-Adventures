@@ -21,6 +21,22 @@ class Module:
                         params.extend(item.parameters())
         return params
     
+    def named_parameters(self, prefix=""):
+        for name, val in self.__dict__.items():
+            if isinstance(val, Tensor): # All parameters are tensors
+                full_name = f"{prefix}{name}" if prefix else name
+                yield full_name, val
+            elif isinstance(val, Module): # Modules contain parameters
+                sub_prefix=f"{prefix}{name}." if prefix else f"{name}."
+                yield from val.named_parameters(sub_prefix)
+            elif isinstance(val, list): # Modules can contain modulelists
+                for i, item in enumerate(val):
+                    if isinstance(item, Module):
+                        sub_prefix = f"{prefix}{name}.{i}" if prefix else f"{name}.{i}"
+                        yield from item.named_parameters(sub_prefix)
+
+
+    
     # def parameters(self):
     #     params = []
     #     for val in self.__dict__.values():
@@ -79,18 +95,22 @@ class Module:
     
     def train(self):
         self.training = True
-        for val in self.__dict__.values():
-            if isinstance(val, Module):
-                if hasattr(val, "training"):
-                    val.training = self.training
-
+        self._set_training_mode(True)
+    
     def eval(self):
         self.training = False
-        for val in self.__dict__.values():
-            if isinstance(val, Module):
-                if hasattr(val, "training"):
-                    val.training = self.training
+        self._set_training_mode(False)
 
+    def _set_training_mode(self, mode):
+        self.training_mode = mode 
+        for val in self.__dict__.values():
+            if hasattr(val, "training"):
+                val.training = mode
+            elif isinstance(val, Module):
+                val._set_training_mode(mode)
+            elif isinstance(val, ModuleList):
+                for child in val:
+                    child._set_training_mode(mode)
 
 class ModuleList(Module):
     def __init__(self, modules=None):
@@ -201,6 +221,7 @@ class Linear(Module):
     def forward(self, x: Tensor):
         x_data = cp.ascontiguousarray(x.data)
         W_data = cp.ascontiguousarray(self.W.data)
+
         out_data = x_data @ W_data
 
         if self.bias:
@@ -265,30 +286,33 @@ class Embedding(Module):
         return f"num_embeddings={self.num_embeddings}, embedding_dim={self.embedding_dim}"
     
     def forward(self, indices):
-        return self.weight[indices]
+        embeds = self.weight[indices]
+        return embeds
 
 class Dropout(Module):
     def __init__(self, dropout_p=0.5):
+      
         self.p = dropout_p
+        self.keep_p = 1.0 - dropout_p
         self.training = True
-        self.mask = None  # will hold mask during forward
+        self.mask = None
 
     def __call__(self, x):
         return self.forward(x)
 
-    def __repr__(self):
-        return f"Dropout(p={self.p})"
-
     def forward(self, x):
-        if not self.training:
-            return x  # no dropout during evaluation
+        
+        if not self.training or self.p == 0.0:
+            return x
 
-        # Generate dropout mask (random 0/1), then scale
-        self.mask = (cp.random.rand(*x.shape) >= self.p).astype(cp.float32)
-        self.mask = self.mask / (1.0 - self.p)  # scale remaining activations
+        ### This is slow as it creates a tensor the same shape as your activations ###
+        mask = cp.random.random_sample(x.shape, dtype=cp.float32)
+        mask = mask >= self.p
 
-        # Apply mask
-        out = x * self.mask
+        ### Reweight Non-Masked Positions ###
+        mask = mask / (1.0 - self.p)
+        out = x * mask
+    
         return out
 
 class AutoLayerNorm(Module):
@@ -413,7 +437,7 @@ class AutoReLU:
     def forward(self, x):
 
         ### Check where x < 0 ###
-        mask = Tensor(cp.where(x.data < 0, 0, 1))
+        mask = Tensor(cp.where(x.data < 0, 0, 1).astype(cp.float32))
         x = x * mask
         return x
     
@@ -561,7 +585,7 @@ class AutoCrossEntropyLoss(Module):
         nll = -log_softmax[cp.arange(B), y]
 
         ### Mean loss ###
-        loss = nll.sum() / B
+        loss = nll.sum() / float(B)
 
         return loss
 
@@ -608,11 +632,12 @@ class CrossEntropyLoss(Module):
 
                 z.backward(grad_input.reshape(*z.shape), child)
 
+        requires_grad = z.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
             cp.array(loss_value, dtype=cp.float32),
-            requires_grad=z.requires_grad,
-            grad_fn=_cross_entropy_backward,
-            grad_fn_name="<CrossEntropyBackward>"
+            requires_grad=requires_grad,
+            grad_fn=_cross_entropy_backward if requires_grad else None,
+            grad_fn_name="<CrossEntropyBackward>" if requires_grad else None
         )
 
         # Add child for autograd

@@ -59,26 +59,25 @@ class Attention(nn.Module):
         
 
     def forward(self, x, attention_mask=None):
-
+     
         ### Store Shape ###
         batch, seq_len, embed_dim = x.shape
 
         ### Flatten Batch and Seq Len Dimension ###
         x = x.reshape(batch*seq_len, embed_dim)
-
+   
         ### Compute Attention with Flash Attention ###
         q = self.q_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
         k = self.k_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
         v = self.v_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
-        
+       
         ### Compute Attention (Attention Mask has shape Batch x Sequence len x Sequence len) ###
         scores = (q @ k.transpose(-2, -1)) / self.head_dim**0.5
-        scores = scores.astype(cp.float32)
-
+    
         ### Add attention mask if it exists ###
         if attention_mask is not None:
             scores += attention_mask
-
+     
         attention = self.softmax(scores, dim=-1)
         attention = self.attn_drop(attention)
 
@@ -176,7 +175,7 @@ class Transformer(nn.Module):
 
         for block in self.blocks:
             x = block(x, attention_mask)
-
+       
         ### Flatten for Linear Layer ###        
         x = x.reshape(batch_size*seq_len, self.embed_dim)
         x = self.lm_head(x)
@@ -213,7 +212,6 @@ model = Transformer(vocab_size=vocab_size,
                     dropout_p=0.1, 
                     mlp_ratio=4)
 
-
 # 3. Batch generation
 def get_batch(data, batch_size, seq_len):
     idx = cp.random.randint(0, len(data) - seq_len - 1, batch_size)
@@ -222,23 +220,56 @@ def get_batch(data, batch_size, seq_len):
     return inputs, targets.flatten()
 
 seq_len = 256
-causal_mask = mytorch.Tensor(cp.triu(np.ones((1, 1, seq_len, seq_len)) * -1e9, k=1)).astype(cp.float32)
+causal_mask = mytorch.Tensor(cp.triu(np.ones((1, 1, seq_len, seq_len)) * float('-inf'), k=1)).astype(cp.float32)
 loss_fn = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.0001)
 
 # 5. Training loop
-model.train()
-train_iterations = 5000
+train_iterations = 500
 batch_size = 32
 
 for epoch in tqdm(range(train_iterations)):
     inputs, targets = get_batch(data, batch_size, seq_len)
-
     logits = model(inputs, causal_mask)
     loss = loss_fn(logits, targets)
     loss.backward()
-
+    
     optimizer.step()
     optimizer.zero_grad()
 
-    print(loss.data)
+    if epoch % 100 == 0:
+        accuracy = (logits.argmax(dim=-1).reshape(-1) == targets).sum() / len(targets) * 100
+        print(f"Epoch {epoch}, Loss: {loss.item():.4f}, Accuracy: {accuracy.item():.2f}%")
+
+# Evaluation 
+model.eval()
+
+# Initialize seed tensor (make sure dtype is long/int for indices)
+seed = mytorch.Tensor(cp.array([[char_to_idx['h']]])) 
+generated = [seed.data.item()]
+
+with mytorch.no_grad():
+    for _ in range(seq_len):
+        curr_len = seed.shape[1]
+
+        # Create causal mask (upper-triangular with -inf)
+        causal_mask_data = mytorch.Tensor(cp.triu(cp.ones((curr_len, curr_len), dtype=cp.float32) * float('-inf'), k=1))
+
+        # Forward pass
+        logits = model(seed, causal_mask_data)
+        last_logits = logits.data[0, -1]  # last position logits
+
+        # Softmax + sample
+        exp_logits = cp.exp(last_logits - cp.max(last_logits))
+        probs = (exp_logits / cp.sum(exp_logits)).get() 
+        next_token = np.random.choice(vocab_size, p=probs)
+
+        # Append generated token
+        generated.append(next_token)
+
+        # Update seed with new token
+        seed = mytorch.Tensor(cp.array([generated], dtype=cp.int32))
+        print(seed.shape)
+
+# Convert indices back to characters
+print("".join([idx_to_char[i] for i in generated]))

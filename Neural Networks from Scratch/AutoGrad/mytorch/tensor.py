@@ -1,8 +1,43 @@
+import os
 import cupy as cp
-import numpy as np
 import weakref
+from contextlib import contextmanager
+
+##### QUICK ENABLE FOR TENSOR CORE OPS ###
+device = cp.cuda.Device()
+# string containing the major index and the minor index. 
+# For example, compute capability 3.5 is represented by the string ‘35’.
+cc_major, cc_minor = device.compute_capability 
+if int(cc_major) >= 8:
+    os.environ["CUPY_TF32"] = "1"
+##########################################
+    
+def cupy_prod(x, axis=None, dtype=None, keepdims=False):
+    """
+    Quick helper method as cp.prod(x) doesnt work if x is a list
+    unlike numpy that internally converts to numpy array before 
+    doing the prod
+    """
+    if not isinstance(x, cp.ndarray):
+        x = cp.array(x)
+    return cp.prod(x, axis=axis, dtype=dtype, keepdims=keepdims).astype(cp.float32)
+
+@contextmanager
+def no_grad():
+    old_state = Tensor._build_graph
+    Tensor._build_graph = False
+    try:
+        # Yield is where we get the 'with' statement to execute
+        yield
+    finally:
+        # Finally ensures that no matter what the original _build_graph is restored
+        Tensor._build_graph = old_state
 
 class Tensor:
+
+    ### For Context Manager no_grad() ###
+    _build_graph = True
+
     def __init__(self, 
                  data, 
                  requires_grad=False, 
@@ -22,14 +57,21 @@ class Tensor:
         
         ### If we actually want to store gradient, Initialize with Zeros ###
         if self.requires_grad:
-            self.grad = cp.zeros_like(self.data)
+            self.grad = cp.zeros_like(self.data, dtype=cp.float32)
 
     def __repr__(self):
         if self.grad_fn_name is None:
-            return f"{self.data}, requires_grad={self.requires_grad}"
+            if self.requires_grad:
+                return f"{self.data}, requires_grad={self.requires_grad}"
+            else:
+                return f"{self.data}"
         else:
             return f"{self.data}, grad_fn={self.grad_fn_name}"
-        
+    
+    @classmethod
+    def build_graph_enabled(cls):
+        return cls._build_graph
+    
     def _check_broadcast(self, a, b):
 
         ## Verify that two numpy arrays are broadcastable ###
@@ -106,12 +148,18 @@ class Tensor:
         return x_grad
         
     def backward(self, input_grad=None, child=None):
-
+        
+        ### During inference the output has no grads, you cant call backward on this ###
+        if child is None and self.grad_fn is None:
+            raise RuntimeError(
+                "No grad_fn defined for this tensor."
+            )
+        
         if self.requires_grad:
 
             ### Base Case (dL/dL = 1) for the start of chain rule ###
             if input_grad is None:
-                input_grad = cp.ones_like(self.data)
+                input_grad = cp.ones_like(self.data, dtype=cp.float32)
 
             ### Accumulate Gradients ###
             if not input_grad.flags.c_contiguous:
@@ -153,9 +201,9 @@ class Tensor:
                 ### immediately be deleted ###
                 grad_fn_to_call = self.grad_fn
                 
-                # *** THE FIX: Break the reference cycle by clearing grad_fn ***
-                del self.grad_fn
-                
+                ### Clear Grad Function so the Garbage Collector can delete it ###
+                self.grad_fn = None
+
                 # Call the backward function
                 grad_fn_to_call(self.grad, self)
 
@@ -192,11 +240,11 @@ class Tensor:
         ### Wrap our output in our tensor object ###
         ### We will compute grad on this if self or val are also tracking gradients ###
         ### We also store the backward_fn for the backward pass ###
-        requires_grad = self.requires_grad or val.requires_grad
+        requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
         output = Tensor(output,
                         requires_grad=requires_grad,
                         grad_fn=_add_backward if requires_grad else None,
-                        grad_fn_name="<AddBackward>" if requires_grad else None).astype(cp.float32)
+                        grad_fn_name="<AddBackward>" if requires_grad else None)#.astype(cp.float32)
         
         ### This output is the child of the inputs a and b ###
         self._add_child(output)
@@ -220,7 +268,7 @@ class Tensor:
 
         """
         return self + val
-    
+
     def __sub__(self, val):
 
         """
@@ -255,11 +303,11 @@ class Tensor:
         ### Wrap our output in our tensor object ###
         ### We will compute grad on this if self or val are also tracking gradients ###
         ### We also store the backward_fn for the backward pass ###
-        requires_grad = self.requires_grad or val.requires_grad
+        requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
         output = Tensor(output,
                         requires_grad=requires_grad,
                         grad_fn=_sub_backward if requires_grad else None,
-                        grad_fn_name="<SubBackward>" if requires_grad else None).astype(cp.float32)
+                        grad_fn_name="<SubBackward>" if requires_grad else None)#.astype(cp.float32)
         
         ### This output is the child of the inputs a and b ###
         self._add_child(output)
@@ -294,9 +342,9 @@ class Tensor:
 
         ### if val is not a tensor alredy, we will add as a constant without gradients ###
         if not isinstance(val, Tensor): 
-            val = Tensor(val)
+            val = Tensor(val).astype(cp.float32)
 
-        ### Check Broadcast ###
+        ### Check Broadcast ### 
         self._check_broadcast(self, val)
             
         output = self.data * val.data
@@ -313,11 +361,11 @@ class Tensor:
                 val_grad = self._broadcasted_grad_accumulate(val, val_grad)
                 val.backward(val_grad, child)
 
-        requires_grad = self.requires_grad or val.requires_grad
+        requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
         output = Tensor(output, 
                         requires_grad=requires_grad, 
                         grad_fn=_mul_backward if requires_grad else None,
-                        grad_fn_name="<MulBackward>" if requires_grad else None).astype(cp.float32)
+                        grad_fn_name="<MulBackward>" if requires_grad else None)#.astype(cp.float32)
         
         self._add_child(output)
         val._add_child(output)
@@ -328,35 +376,39 @@ class Tensor:
         return self * val
 
     def __neg__(self):
-        return self * -1
+        return self * cp.array(-1.0, dtype=self.data.dtype)
 
     def __matmul__(self, val):
         if not isinstance(val, Tensor):
             val = Tensor(val)
         
-        output_data = cp.matmul(self.data, val.data)
+        ### Preallocate Memory for MatMul ###
+        non_matmul_shapes = self.shape[:-2]
+        output_shape = (*non_matmul_shapes, self.data.shape[-2], val.data.shape[-1])
+        prealloc = cp.empty(output_shape, dtype=self.data.dtype)
+
+        ### Compute MatMul ###
+        output_data = cp.matmul(self.data, val.data, out=prealloc)
 
         def _matmul_backward(input_grad, child):
-            # Make sure inputs are contiguous for fast matmul
-            a_data = self.data if self.data.flags.c_contiguous else cp.ascontiguousarray(self.data)
-            b_data = val.data if val.data.flags.c_contiguous else cp.ascontiguousarray(val.data)
-            grad_input = input_grad if input_grad.flags.c_contiguous else cp.ascontiguousarray(input_grad)
 
             if self.requires_grad:
-                grad_a = cp.matmul(grad_input, b_data.swapaxes(-1, -2))
-                self.backward(grad_a, child)
+                prealloc_grad_self = cp.empty(shape=self.shape, dtype=self.data.dtype)
+                grad_self = cp.matmul(input_grad, val.data.swapaxes(-1, -2), out=prealloc_grad_self)
+                self.backward(grad_self, child)
 
             if val.requires_grad:
-                grad_b = cp.matmul(a_data.swapaxes(-1, -2), grad_input)
-                val.backward(grad_b, child)
+                prealloc_grad_val = cp.empty(shape=val.shape, dtype=self.data.dtype)
+                grad_val = cp.matmul(self.data.swapaxes(-1, -2), input_grad, out=prealloc_grad_val)
+                val.backward(grad_val, child)
 
-        requires_grad = self.requires_grad or val.requires_grad
+        requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
         out = Tensor(
             output_data,
             requires_grad=requires_grad,
             grad_fn=_matmul_backward if requires_grad else None,
             grad_fn_name="<MatmulBackward>" if requires_grad else None
-        ).astype(cp.float32) 
+        )#.astype(cp.float32) 
 
         self._add_child(out)
         val._add_child(out)
@@ -376,13 +428,13 @@ class Tensor:
 
         ### if val is not a tensor alredy, we will add as a constant without gradients ###
         if not isinstance(val, Tensor): 
-            val = Tensor(val)
+            val = Tensor(val).astype(cp.float32)
 
         ### Check Broadcast ###
         self._check_broadcast(self, val)
 
         output = self.data / val.data
-
+  
         def _div_backward(input_grad, child):
             if self.requires_grad:
                 self_grad = input_grad / val.data
@@ -395,11 +447,11 @@ class Tensor:
                 val.backward(val_grad, child)
         
         ### Convert to Tensor ###
-        requires_grad = self.requires_grad or val.requires_grad
+        requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
         output = Tensor(output,
                         requires_grad=requires_grad,
                         grad_fn=_div_backward if requires_grad else None,
-                        grad_fn_name="<DivBackward>" if requires_grad else None).astype(cp.float32) 
+                        grad_fn_name="<DivBackward>" if requires_grad else None)#.astype(cp.float32) 
 
         ### This output is the child of the inputs a and b ###
         self._add_child(output)
@@ -418,7 +470,7 @@ class Tensor:
         """
         ### if val is not a tensor alredy, we will add as a constant without gradients ###
         if not isinstance(val, Tensor): 
-            val = Tensor(val)
+            val = Tensor(val).astype(cp.float32)
 
         return val / self
 
@@ -431,15 +483,16 @@ class Tensor:
         """
 
         output = self.data ** exponent
-
+    
         def _pow_backward(input_grad, child):
             self_grad = input_grad * (exponent * self.data ** (exponent-1))
             self.backward(self_grad, child)
 
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(output,
-                        requires_grad=self.requires_grad,
-                        grad_fn=_pow_backward if self.requires_grad else None,
-                        grad_fn_name="<PowBackward>" if self.requires_grad else None).astype(cp.float32)
+                        requires_grad=requires_grad,
+                        grad_fn=_pow_backward if requires_grad else None,
+                        grad_fn_name="<PowBackward>" if requires_grad else None)#.astype(cp.float32)
         
         self._add_child(output)
 
@@ -459,10 +512,11 @@ class Tensor:
             self_grad[index] = input_grad
             self.backward(self_grad, child)
 
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(output, 
-                        requires_grad=self.requires_grad, 
-                        grad_fn=_index_backward if self.requires_grad else None, 
-                        grad_fn_name="<IndexBackward>" if self.requires_grad else None).astype(cp.float32)
+                        requires_grad=requires_grad, 
+                        grad_fn=_index_backward if requires_grad else None, 
+                        grad_fn_name="<IndexBackward>" if requires_grad else None)#.astype(cp.float32)
         
         self._add_child(output)
 
@@ -494,15 +548,16 @@ class Tensor:
         Swap two dimensions of the tensor.
         """
         out_data = self.data.swapaxes(dim1, dim2)
-
+ 
         def _transpose_backward(input_grad, child):
             # Just swap back the same two dims
             self.backward(input_grad.swapaxes(dim1, dim2), child)
 
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(out_data,
-                    requires_grad=self.requires_grad,
-                    grad_fn=_transpose_backward if self.requires_grad else None,
-                    grad_fn_name="<TransposeBackward>" if self.requires_grad else None).astype(cp.float32)
+                    requires_grad=requires_grad,
+                    grad_fn=_transpose_backward if requires_grad else None,
+                    grad_fn_name="<TransposeBackward>" if requires_grad else None)#.astype(cp.float32)
         
         self._add_child(out)
 
@@ -520,10 +575,11 @@ class Tensor:
             inv_dims = cp.argsort(dims)
             self.backward(cp.transpose(input_grad, axes=inv_dims), child)
 
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(out_data,
-                    requires_grad=self.requires_grad,
-                    grad_fn=_permute_backward if self.requires_grad else None,
-                    grad_fn_name="<PermuteBackward>" if self.requires_grad else None).astype(cp.float32)
+                    requires_grad=requires_grad,
+                    grad_fn=_permute_backward if requires_grad else None,
+                    grad_fn_name="<PermuteBackward>" if requires_grad else None)#.astype(cp.float32)
         
         self._add_child(out)
         return out
@@ -542,10 +598,11 @@ class Tensor:
             self_grad = input_grad * cp.exp(self.data)
             self.backward(self_grad, child)
         
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(output, 
-                        requires_grad=self.requires_grad,
-                        grad_fn=_exp_backward if self.requires_grad else None, 
-                        grad_fn_name="<ExpBackward>" if self.requires_grad else None).astype(cp.float32)
+                        requires_grad=requires_grad,
+                        grad_fn=_exp_backward if requires_grad else None, 
+                        grad_fn_name="<ExpBackward>" if requires_grad else None)#.astype(cp.float32)
         
         self._add_child(output)
 
@@ -560,15 +617,16 @@ class Tensor:
         """
 
         output = cp.log(self.data)
-
+   
         def _log_backward(input_grad, child):   
             self_grad = input_grad * (1/self.data)
             self.backward(self_grad, child)
         
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(output, 
-                        requires_grad=self.requires_grad,
-                        grad_fn=_log_backward if self.requires_grad else None, 
-                        grad_fn_name="<LogBackward>" if self.requires_grad else None).astype(cp.float32)
+                        requires_grad=requires_grad,
+                        grad_fn=_log_backward if requires_grad else None, 
+                        grad_fn_name="<LogBackward>" if requires_grad else None)#.astype(cp.float32)
         
         self._add_child(output)
 
@@ -596,23 +654,28 @@ class Tensor:
 
         def _sum_backward(input_grad, child):
 
-            ### Add dimensions to input grad to match self
-            grad_dims = len(input_grad.shape)
-            self_dims = len(self.shape)
-
-            if grad_dims != self_dims:
-                diff = self_dims - grad_dims    
-                for _ in range(diff):
-                    input_grad = cp.expand_dims(input_grad, axis=-1)
+            # ### Add dimensions to input grad to match self
+            # grad_dims = len(input_grad.shape)
+            # self_dims = len(self.shape)
             
-            self_grad = input_grad * cp.ones((self.shape))
-    
+            # ### Expand input grad (upstream) to match dimensions of the input ###
+            # if grad_dims != self_dims:
+            #     diff = self_dims - grad_dims    
+            #     for _ in range(diff):
+            #         input_grad = cp.expand_dims(input_grad, axis=-1)
+
+            # ### Copies gradients from input to all values in the input ###
+            # self_grad = input_grad * cp.ones((self.shape))
+            
+            ### Simpler to just use broadcast_to, to match shapes
+            self_grad = cp.broadcast_to(input_grad, self.shape)
             self.backward(self_grad, child)
-        
+
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(output,
-                        requires_grad=self.requires_grad,
-                        grad_fn=_sum_backward if self.requires_grad else None,
-                        grad_fn_name="<SumBackward>" if self.requires_grad else None).astype(cp.float32)
+                        requires_grad=requires_grad,
+                        grad_fn=_sum_backward if requires_grad else None,
+                        grad_fn_name="<SumBackward>" if requires_grad else None)#.astype(cp.float32)
         
         self._add_child(output)
 
@@ -640,38 +703,43 @@ class Tensor:
 
         def _mean_backward(input_grad, child, dim=dim):
                 
-                ### Add dimensions to input grad to match self
-                grad_dims = len(input_grad.shape)
-                self_dims = len(self.shape)
+                # ### Add dimensions to input grad to match self
+                # grad_dims = len(input_grad.shape)
+                # self_dims = len(self.shape)
 
-                if grad_dims != self_dims:
-                    diff = self_dims - grad_dims    
-                    for _ in range(diff):
-                        input_grad = cp.expand_dims(input_grad, axis=-1)
+                # ### Expand input grad (upstream) to match dimensions of the input ###
+                # if grad_dims != self_dims:
+                #     diff = self_dims - grad_dims    
+                #     for _ in range(diff):
+                #         input_grad = cp.expand_dims(input_grad, axis=-1)
 
-                ### We average over the dim dimension ###
-                ### and averaging is just a sum / constant ###
-                ### where the constant is the num elements in that dim ###
-                ### So we can multiply our input_grad by the 1/constant ###
-
-                if isinstance(dim, int):
-                    dim = [dim]
-                elif isinstance(dim, tuple):
-                    dim = list(dim)
+                # ### We average over the dim dimension ###
+                # ### and averaging is just a sum / constant ###
+                # ### where the constant is the num elements in that dim ###
+                # ### So we can multiply our input_grad by the 1/constant ###
+                # if isinstance(dim, int):
+                #     dim = [dim]
+                # elif isinstance(dim, tuple):
+                #     dim = list(dim)
                 
-                ### Multiply together all flattened dimensions sizes ###
-                dim_sizes = [self.shape[i] for i in dim] if dim != -1 else list(self.shape)
-                num_vals_avged = 1
-                for dim in dim_sizes:
-                    num_vals_avged*= dim
+                # ### Multiply together all flattened dimensions sizes to get num_vals_averaged ###
+                # dim_sizes = [self.shape[i] for i in dim]
+                # num_vals_averaged = 1
+                # for dim in dim_sizes:
+                #     num_vals_averaged*= dim
 
-                self_grad = input_grad * cp.ones((self.shape)) / num_vals_avged
+                # ### Copy 1/num_vals_averaged to all values in the inputs ###
+                # self_grad = input_grad * cp.ones((self.shape)) / num_vals_averaged
+  
+                ### Easier to just use broadcast_to ###
+                self_grad = cp.broadcast_to(input_grad, self.shape) / cupy_prod([self.shape[d] for d in (dim if isinstance(dim, tuple) else [dim])])
                 self.backward(self_grad, child)
-
+        
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(output,
-                        requires_grad=self.requires_grad,
-                        grad_fn=_mean_backward if self.requires_grad else None,
-                        grad_fn_name="<MeanBackward>" if self.requires_grad else None).astype(cp.float32)
+                        requires_grad=requires_grad,
+                        grad_fn=_mean_backward if requires_grad else None,
+                        grad_fn_name="<MeanBackward>" if requires_grad else None)#.astype(cp.float32)
         
         self._add_child(output)
 
@@ -691,74 +759,84 @@ class Tensor:
         mean_vals = self.data.mean(axis=dim, keepdims=True)
         var_vals = ((self.data - mean_vals) ** 2).mean(axis=dim, keepdims=keepdims)
 
-        def _var_backward(input_grad, child, dim=dim, keepdims=keepdims, mean_vals=mean_vals):
-            # Adjust gradient shape to match self
-            grad_dims = len(input_grad.shape)
-            self_dims = len(self.shape)
-            if grad_dims != self_dims:
-                diff = self_dims - grad_dims    
-                for _ in range(diff):
-                    input_grad = cp.expand_dims(input_grad, axis=-1)
+        def _var_backward(input_grad, child, dim=dim, mean_vals=mean_vals):
+            
+            # ### Add dimensions to input grad to match self
+            # grad_dims = len(input_grad.shape)
+            # self_dims = len(self.shape)
 
-            # Handle dim argument (normalize to list)
-            if isinstance(dim, int):
-                dim = [dim]
-            elif isinstance(dim, tuple):
-                dim = list(dim)
+            # ### Expand input grad (upstream) to match dimensions of the input ###
+            # if grad_dims != self_dims:
+            #     diff = self_dims - grad_dims    
+            #     for _ in range(diff):
+            #         input_grad = cp.expand_dims(input_grad, axis=-1)
 
-            ### Multiply together all flattened dimensions sizes ###
-            dim_sizes = [self.shape[i] for i in dim] if dim != -1 else list(self.shape)
-            num_vals_vared = 1
-            for dim in dim_sizes:
-                num_vals_vared*= dim
+            # ### We compute variance over the dim dimension ###
+            # ### and so we need the number of elements this happened on! ###
+            # if isinstance(dim, int):
+            #     dim = [dim]
+            # elif isinstance(dim, tuple):
+            #     dim = list(dim)
 
-            # Gradient formula: dVar/dx = 2/N * (x - mean(x)) * input_grad
+            # ### Multiply together all flattened dimensions sizes ###
+            # dim_sizes = [self.shape[i] for i in dim]
+            # num_vals_vared = 1
+            # for dim in dim_sizes:
+            #     num_vals_vared*= dim
+
+            # # Gradient formula: dVar/dx = 2/N * (x - mean(x)) * input_grad
+            # centered = self.data - mean_vals
+            # self_grad = (2.0 / num_vals_vared) * centered * input_grad
+
+            ### Easier to just use broadcast_to ###
             centered = self.data - mean_vals
-            self_grad = (2.0 / num_vals_vared) * centered * input_grad
-
+            self_grad = 2.0 * centered * cp.broadcast_to(input_grad, self.shape) / cupy_prod([self.shape[d] for d in (dim if isinstance(dim, tuple) else [dim])])
             self.backward(self_grad, child)
-
+    
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(var_vals,
-                        requires_grad=self.requires_grad,
-                        grad_fn=_var_backward if self.requires_grad else None,
-                        grad_fn_name="<VarBackward>" if self.requires_grad else None).astype(cp.float32)
+                        requires_grad=requires_grad,
+                        grad_fn=_var_backward if requires_grad else None,
+                        grad_fn_name="<VarBackward>" if requires_grad else None)#.astype(cp.float32)
 
         self._add_child(output)
 
         return output
 
-    def max(self, dim=None, keepdims=False):
+    def max(self, dim=-1, keepdims=False):
         """
         Compute max along axis (like numpy.max) with autograd support.
         """
         out_data = self.data.max(axis=dim, keepdims=keepdims)
 
         def _max_backward(input_grad, child):
-            grad = cp.zeros_like(self.data)
+
+            grad = cp.zeros_like(self.data, dtype=cp.float32)
 
             # Broadcast input_grad if needed
             if dim is not None and not keepdims:
                 input_grad = cp.expand_dims(input_grad, dim)
 
             # Broadcast to match self shape
-            input_grad = input_grad * cp.ones_like(self.data)
-
+            input_grad = input_grad * cp.ones_like(self.data, dtype=cp.float32)
+            
             # Only propagate gradient to positions where max occurred
             mask = (self.data == (out_data if keepdims else cp.expand_dims(out_data, dim)))
             grad += input_grad * mask
-
+  
             # Call backward on self
             self.backward(grad, child)
 
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(out_data,
-                    requires_grad=self.requires_grad,
-                    grad_fn=_max_backward if self.requires_grad else None,
-                    grad_fn_name="<MaxBackward>" if self.requires_grad else None).astype(cp.float32)
+                    requires_grad=requires_grad,
+                    grad_fn=_max_backward if requires_grad else None,
+                    grad_fn_name="<MaxBackward>" if requires_grad else None)#.astype(cp.float32)
 
         self._add_child(out)
         return out
     
-    def argmax(self, dim=None):
+    def argmax(self, dim=-1):
         
         output = self.data.argmax(axis=dim)
 
@@ -768,10 +846,11 @@ class Tensor:
             """
             return cp.zeros_like(self)
         
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(output, 
-                        requires_grad=self.requires_grad, 
-                        grad_fn=_argmax_backward, 
-                        grad_fn_name="<ArgmaxBackward>")
+                        requires_grad=requires_grad, 
+                        grad_fn=_argmax_backward if requires_grad else None, 
+                        grad_fn_name="<ArgmaxBackward>" if requires_grad else None)
         
         return output
     
@@ -784,17 +863,18 @@ class Tensor:
         """
         
         output = self.data.reshape(*shape)
-
+   
         def _reshape_backward(input_grad, child):
 
             if self.requires_grad:
                 self_grad = input_grad.reshape(self.data.shape)
                 self.backward(self_grad, child)
-
+        
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(output, 
-                        requires_grad=self.requires_grad, 
-                        grad_fn=_reshape_backward if self.requires_grad else None, 
-                        grad_fn_name="ReshapeBackward" if self.requires_grad else None).astype(cp.float32)
+                        requires_grad=requires_grad, 
+                        grad_fn=_reshape_backward if requires_grad else None, 
+                        grad_fn_name="ReshapeBackward" if requires_grad else None)#.astype(cp.float32)
         
         self._add_child(output)
         
@@ -804,6 +884,7 @@ class Tensor:
         """
         Supports slices, ints, arrays, and tuple-of-arrays indexing.
         """
+
         # Convert Tensor indices to cp arrays
         if isinstance(idx, Tensor):
             idx = idx.data
@@ -825,10 +906,11 @@ class Tensor:
 
             self.backward(grad, child)
 
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(out_data,
-                    requires_grad=self.requires_grad,
-                    grad_fn=_index_backward if self.requires_grad else None,
-                    grad_fn_name="<IndexBackward>" if self.requires_grad else None).astype(cp.float32)
+                    requires_grad=requires_grad,
+                    grad_fn=_index_backward if requires_grad else None,
+                    grad_fn_name="<IndexBackward>" if requires_grad else None)#.astype(cp.float32)
         
         self._add_child(out)
         return out
@@ -842,8 +924,8 @@ class Tensor:
             return input
         elif isinstance(input, Tensor):
             return input.data
-        else:            
-            return cp.array(input)    
+        else:           
+            return cp.array(input)
 
     # def _add_child(self, child_tensor):
 
@@ -858,6 +940,7 @@ class Tensor:
     def _add_child(self, child_tensor):
         """
         Helper function to add a tensor as a child of an operation using Weakreferences
+        You can learn more about this here: https://martinheinz.dev/blog/112
         """
         if not isinstance(child_tensor, Tensor):
             raise Exception("Children of Tensors must also be a Tensor")
