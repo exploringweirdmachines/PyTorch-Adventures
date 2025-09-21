@@ -1,6 +1,13 @@
 import cupy as cp
 
-class SGD:
+class Optimizer:
+    def step(self):
+        raise NotImplementedError
+
+    def zero_grad(self):
+        raise NotImplementedError
+    
+class SGD(Optimizer):
     def __init__(self, parameters, lr=0.001):
         self.parameters = parameters
         self.lr = lr
@@ -16,7 +23,7 @@ class SGD:
             if param.requires_grad:
                 param.grad = None
 
-class Adam:
+class Adam(Optimizer):
     def __init__(self, parameters, lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0):
         # Only keep trainable parameters
         self.params = [p for p in parameters if p.requires_grad]
@@ -62,7 +69,7 @@ class Adam:
         for p in self.params:
             p.grad = None
 
-class AdamW:
+class AdamW(Optimizer):
     def __init__(self, parameters, lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.01):
         # Only keep trainable parameters
         self.params = [p for p in parameters if p.requires_grad]

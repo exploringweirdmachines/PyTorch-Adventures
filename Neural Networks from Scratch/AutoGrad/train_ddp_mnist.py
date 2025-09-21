@@ -44,7 +44,7 @@ class MyTorchMNIST(nn.Module):
         return x
 
 model = MyTorchMNIST()
-model = accelerator.prepare_model(model)
+
 
 ####################
 ### LOAD DATASET ###
@@ -60,14 +60,22 @@ def collate_fn(batch):
 trainloader = DataLoader(train, batch_size=16, collate_fn=collate_fn, num_workers=2)
 testloader = DataLoader(test, batch_size=16, collate_fn=collate_fn, num_workers=2)
 
-trainloader = accelerator.prepare_dataloaders(trainloader)
-
 ###############################
 ### LOAD OPTIMIZER AND LOSS ###
 ###############################
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 loss_fn = nn.CrossEntropyLoss()
 
+##########################
+### PREPARE EVERYTHING ###
+##########################
+model, optimizer, trainloader, testloader = accelerator.prepare(
+    model, optimizer, trainloader, testloader
+) 
+# trainloader = accelerator.prepare_dataloaders(trainloader)
+# testloader = accelerator.prepare_dataloaders(testloader)
+# optimizer = accelerator.prepare_optimizer(optimizer)
+# model = accelerator.prepare_model(model)
 #############
 ### TRAIN ###
 #############
@@ -79,6 +87,7 @@ for epoch in range(NUM_EPOCHS):
     accelerator.print(f"Epoch {epoch}")
 
     train_loss, train_acc = [], []
+    eval_loss, eval_acc = [], []
 
     model.train()
     for images, labels in tqdm(trainloader, disable=not accelerator.is_main_process()):
@@ -101,9 +110,32 @@ for epoch in range(NUM_EPOCHS):
         # Compute accuracy
         predicted = pred.argmax(dim=-1)
         accuracy = (predicted == labels).sum() / len(predicted)
-        train_loss.append(loss.item())
-        train_acc.append(accuracy.item())
+
+        train_loss.append(accelerator.gather_for_metrics(loss))
+        train_acc.append(accelerator.gather_for_metrics(accuracy))
+
+    model.eval()
+    for images, labels in tqdm(testloader):
+        
+        ### Convert Numpy Arrays to CuPY Arrays on GPU ###
+        images = mytorch.Tensor(images)
+        labels = mytorch.Tensor(labels)
+
+        with mytorch.no_grad():
+            ### Pass Through Model ###
+            pred = model(images)
+            
+            ### Compute Loss ###
+            loss = loss_fn(pred, labels)
+
+        ### Compute Accuracy ###
+        predicted = pred.argmax(dim=-1)
+        accuracy = (predicted == labels).sum() / len(predicted)
+
+        eval_loss.append(accelerator.gather_for_metrics(loss))
+        eval_acc.append(accelerator.gather_for_metrics(accuracy))
 
     accelerator.print(f"Train Loss: {np.mean(train_loss):.4f}, Train Acc: {np.mean(train_acc):.4f}")
+    accelerator.print(f"Eval Loss: {np.mean(eval_loss):.4f}, Eval Acc: {np.mean(eval_acc):.4f}")
 
 accelerator.end_training()

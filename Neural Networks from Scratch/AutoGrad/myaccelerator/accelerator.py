@@ -3,7 +3,7 @@ import cupy as cp
 import numpy as np
 from cupyx.distributed import NCCLBackend
 
-from mytorch.data import DataLoader
+import mytorch
 
 class Accelerator:
     def __init__(self, 
@@ -41,22 +41,39 @@ class Accelerator:
     def is_main_process(self):
         return self.rank == 0
     
+    def prepare(self, *args, **kwargs):
+
+        prepared = []
+
+        for obj in args:
+            if isinstance(obj, mytorch.nn.Module):
+                prepared.append(self.prepare_model(obj))
+            elif isinstance(obj, mytorch.optim.Optimizer):
+                prepared.append(self.prepare_optimizer(obj))
+            elif isinstance(obj, mytorch.data.DataLoader):
+                prepared.append(self.prepare_dataloaders(obj))
+        
+        return prepared
+    
     def prepare_model(self, model):
+
         self.model = model
         return self.model
     
     def prepare_optimizer(self, optimizer):
+
+        accelerator = self 
 
         class OptimizerWrapper:
             def __init__(self, base_optimizer):
                 self.base_optimizer = base_optimizer
             
             def step(self, *args, **kwargs):
-                if self.step_counter % self.gradient_accumulation_steps == 0:
+                if accelerator.step_counter % accelerator.gradient_accumulation_steps == 0:
                     return self.base_optimizer.step(*args, **kwargs)
             
             def zero_grad(self, *args, **kwargs):
-                if self.step_counter % self.gradient_accumulation_steps == 0:
+                if accelerator.step_counter % accelerator.gradient_accumulation_steps == 0:
                     return self.base_optimizer.zero_grad(*args, **kwargs)
             
             def __getattr__(self, name):
@@ -65,7 +82,7 @@ class Accelerator:
         return OptimizerWrapper(optimizer)
     
     def prepare_dataloaders(self, dataloader):
-        
+
         if self.world_size <= 1:
             return dataloader
 
@@ -123,7 +140,7 @@ class Accelerator:
         ### Grab Old Dataset ###
         shuffle_flag = getattr(dataloader, "shuffle", True)
         base_dataset = dataloader.dataset
-        sharded_dataset = ShardDataset(base_dataset, world_size=self.world_size, rank=self.rank, shuffle=shuffle_flag)
+        sharded_dataset = ShardDataset(base_dataset, world_size=self.world_size, rank=self.rank, shuffle=shuffle_flag   )
         dataloader.dataset = sharded_dataset
 
         ### Wrap Dataloader for Epoch Based Shuffling ###
@@ -153,6 +170,7 @@ class Accelerator:
         self.step_counter += 1
 
         if self.step_counter % self.gradient_accumulation_steps == 0:
+
             ### Allreduce Gradients ###
             if self.comm is not None:
                 for param in self.model.parameters():
@@ -161,6 +179,18 @@ class Accelerator:
                         self.comm.all_reduce(param.grad, out, op="sum")
                         param.grad[:] = out / self.world_size
 
+    def gather_for_metrics(self, value):
+ 
+        assert isinstance(value, mytorch.Tensor), "Value must be a Tensor"
+        assert value.shape == (), "Value must be a Scalar"
+
+        if self.world_size <= 1 or self.comm is None:
+            return float(value.data[0])
+
+        out = cp.zeros_like(value.data)
+        self.comm.all_reduce(value.data, out, op="sum")
+        return out.item() / self.world_size
+    
     def wait_for_everyone(self):
         self.comm.barrier()
     
