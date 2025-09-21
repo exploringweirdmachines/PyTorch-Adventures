@@ -6,7 +6,7 @@ import mytorch
 import mytorch.nn as nn
 import mytorch.optim as optim
 from torchvision.datasets import MNIST
-from torch.utils.data import DataLoader
+from mytorch.data import DataLoader
 from myaccelerator.accelerator import Accelerator
 
 import argparse
@@ -53,14 +53,14 @@ train = MNIST("../../data", train=True, download=False)
 test = MNIST("../../data", train=False, download=False)
 
 def collate_fn(batch):
-    images = cp.concatenate([cp.array(i[0]).astype(cp.float32).reshape(1,784) for i in batch]) / 255
-    labels = [i[1] for i in batch]
-    images = mytorch.Tensor(images)
-    labels = mytorch.Tensor(labels)
+    images = np.concatenate([np.array(i[0]).astype(np.float32).reshape(1,784) for i in batch]) / 255
+    labels = np.array([i[1] for i in batch])
     return images, labels
 
-trainloader = DataLoader(train, batch_size=16, collate_fn=collate_fn)
-testloader = DataLoader(test, batch_size=16, collate_fn=collate_fn)
+trainloader = DataLoader(train, batch_size=16, collate_fn=collate_fn, num_workers=2)
+testloader = DataLoader(test, batch_size=16, collate_fn=collate_fn, num_workers=2)
+
+trainloader = accelerator.prepare_dataloaders(trainloader)
 
 ###############################
 ### LOAD OPTIMIZER AND LOSS ###
@@ -82,8 +82,12 @@ for epoch in range(NUM_EPOCHS):
 
     model.train()
     for images, labels in tqdm(trainloader, disable=not accelerator.is_main_process()):
+        
+        ### Convert Numpy Arrays to CuPY Arrays on GPU ###
+        images = mytorch.Tensor(images)
+        labels = mytorch.Tensor(labels)
 
-        # Forward
+        # Forward 
         pred = model(images)
         loss = loss_fn(pred, labels)
 

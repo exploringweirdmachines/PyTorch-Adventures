@@ -67,7 +67,10 @@ class DataLoader:
         """
         Grab next slice of indexes for sampling
         """
-
+        
+        ### Thread safe lock to make sure multiple workers dont grab for indices ###
+        ### at the same time!!! They have to be given permission (the lock) to ###
+        ### even enter this chunk of code. Otherwise they wait for their turn ###
         with self.lock:
             if self.current_idx >= len(self.dataset):
                 raise StopIteration
@@ -78,51 +81,47 @@ class DataLoader:
         return batch_indices
 
     def _worker_loop(self):
-        """
-        This is the code that each thread will run. It repeatedly grabs some indices
-        from the dataset, grab the samples, collates them and saves them in the queue. 
 
-        The queue only holds a max of `prefetch` batches in memory. So once the queue is full
-        queue.put() will block the queue  until it is emptied again. 
-        
-        if _get_next_batch_indices() raises a StopIteration, the _worker_loop will also break
-        and exit!
-        """
-        while not self.stop_signal.is_set(): # Returns true if internal flag is true, init as false
-            try:
+        ### While there is data keep storing in the queue ###
+        try:
+            while not self.stop_signal.is_set():
                 batch_indices = self._get_next_batch_indices()
-                batch = [self.dataset[int(i)] for i in batch_indices]
+                batch = [self.dataset[i] for i in batch_indices]
                 batch_array = self.collate_fn(batch)
-
-                ### Blocking statement,that waits until space in the queue opens up ###
                 self.queue.put(batch_array)
-            except StopIteration:
-                break    
         
-        ## when we hit stop iteration, just add a None ###
-        self.queue.put(None)
+        ### once the _get_next_batch_indices() raises StopIteration ###
+        except StopIteration:
+            pass
+
+        ### If we are done, just add a None to our Queue so we can ###
+        ### identify later that this is over and we should exit ###
+        finally:
+            self.queue.put(None)
 
     def __iter__(self):
-        
-        """
-        This returns an iterable that we can actually iterate through. If we shuffle, we first
-        randomize the order of the indexes. It also resets our current index to start from the 
-        beginning and then the stop_signal is set to false, as we are just starting!
 
-        We then spawn num_workers threads each running the worker loop (independently)
-        """
+        ### __iter__ starts the iteration of our object. Go ahead and ###
+        ### restart the index and stop_signal flag should be False ###
+        self.current_idx = 0
+        self.stop_signal.clear()
         
+        ### Random shuffle ###
         if self.shuffle:
             self.indices = np.random.permutation(len(self.dataset))
+        
+        ### Clear queue from previous epoch (its full of Nones) ###
+        if self.queue is not None:
+            while not self.queue.empty(): # While not empty
+                try: # try to 
+                    self.queue.get_nowait() # remove an item without waiting (no block)
+                
+                ### Even though we checked for not self.queue.empty() another thread may
+                ### have just removed the last item before this call 
+                except queue.Empty: 
+                    break
 
-        ### Sets current index back to start ###
-        self.current_idx = 0
-
-        ### Sets stop signal to False ###
-        self.stop_signal.clear()
-
-        ### Start worker threads if needed. Even if you have num_workers=1, it will ###
-        ### prefetch batches to store in memory ###
+        ### Spawn workers to start filling queue asynchronously ###
         self.workers = []
         for _ in range(self.num_workers):
             t = threading.Thread(target=self._worker_loop, daemon=True)
@@ -133,32 +132,22 @@ class DataLoader:
 
     def __next__(self):
 
-        """
-        When single threaded we just grab a batch and collate
-
-        When multithreaded we get a batch from our queue. If no batch arrives
-        within 5 seconds then the code sets a stop_signal to be True and we 
-        stop iteration. 
-        """
+        ### When not using queue ###
         if self.num_workers == 0:
-            
-            ### Load data synchronously ###
-            try:
-                batch_indices = self._get_next_batch_indices()
-                batch = [self.dataset[int(i)] for i in batch_indices]
-                return self.collate_fn(batch)
-            except StopIteration:
-                raise StopIteration
+            batch_indices = self._get_next_batch_indices()
+            batch = [self.dataset[i] for i in batch_indices]
+            return self.collate_fn(batch)
 
+        ### Otherwise keep grabbing batches until StopIteration ###
         while True:
-            try:
-                batch = self.queue.get(timeout=self.timeout)
-                if batch is None: # Info from worker that we are out 
-                    raise StopIteration
-                return batch
-            except queue.Empty:
-                self.stop_signal.set()
+            batch = self.queue.get(timeout=self.timeout)
+            if batch is None: # this is the None we inserted earlier
+                # Re-insert the None again so the other workers can see this None 
+                # as well. Otherwise we would just remove the None and the other 
+                # workers could just keep going
+                self.queue.put(None)
                 raise StopIteration
+            return batch
     
     def shutdown(self):
         

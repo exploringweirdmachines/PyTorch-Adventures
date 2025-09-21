@@ -64,11 +64,11 @@ class Tensor:
     def __repr__(self):
         if self.grad_fn_name is None:
             if self.requires_grad:
-                return f"{self.data}, requires_grad={self.requires_grad}"
+                return f"{self.data}, requires_grad={self.requires_grad}, device=cuda:{self.data.device.id}"
             else:
-                return f"{self.data}"
+                return f"{self.data}, device=cuda:{self.data.device.id}"
         else:
-            return f"{self.data}, grad_fn={self.grad_fn_name}"
+            return f"{self.data}, grad_fn={self.grad_fn_name}, device=cuda:{self.data.device.id}"
     
     @classmethod
     def build_graph_enabled(cls):
@@ -88,7 +88,7 @@ class Tensor:
         if (len(a.shape) != len(b.shape)) and (a.requires_grad and b.requires_grad):
             raise ValueError(f"Incompatible Operation between {a.shape} and {b.shape}")
         
-    def _broadcasted_grad_accumulate(self, x, x_grad):
+    def _broadcasted_grad_accumulate(self, x_shape, x_grad):
         
         ### This function is crucial and taken from https://github.com/eduardoleao052/Autograd-from-scratch ###
         ### Much of our convenient operations are broadcasting! For example, we can add a tensor of size (A x B)
@@ -134,7 +134,6 @@ class Tensor:
         ### actual tensor for our single bias value is (1,1). Therefore, on the first dimension we have a discrepancy, 
         ### we have a 1 in our tensor, but N in the gradient, so we must add across the dimension and create an accumulated (1,1) gradient 
 
-        x_shape = x.shape
         grad_shape = x_grad.shape
 
         assert len(x_shape) == len(grad_shape), "Gradient and tensor shapes must be the same length! Only different by broadcasting"
@@ -236,11 +235,11 @@ class Tensor:
         def _add_backward(input_grad, child):
             if self.requires_grad:
                 self_grad = input_grad
-                self_grad = self._broadcasted_grad_accumulate(self, self_grad)
+                self_grad = self._broadcasted_grad_accumulate(self.shape, self_grad)
                 self.backward(self_grad, child)
             if val.requires_grad:
                 val_grad = input_grad
-                val_grad = self._broadcasted_grad_accumulate(val, val_grad)
+                val_grad = self._broadcasted_grad_accumulate(val.shape, val_grad)
                 val.backward(val_grad, child)
 
         ### Wrap our output in our tensor object ###
@@ -298,12 +297,12 @@ class Tensor:
         def _sub_backward(input_grad, child):
             if self.requires_grad:
                 self_grad = input_grad
-                self_grad = self._broadcasted_grad_accumulate(self, self_grad)
+                self_grad = self._broadcasted_grad_accumulate(self.shape, self_grad)
                 self.backward(self_grad, child)
                 
             if val.requires_grad:
                 val_grad = -input_grad
-                val_grad = self._broadcasted_grad_accumulate(val, val_grad)
+                val_grad = self._broadcasted_grad_accumulate(val.shape, val_grad)
                 val.backward(val_grad, child)
 
         ### Wrap our output in our tensor object ###
@@ -359,12 +358,12 @@ class Tensor:
 
             if self.requires_grad:
                 self_grad = input_grad * val.data
-                self_grad = self._broadcasted_grad_accumulate(self, self_grad)
+                self_grad = self._broadcasted_grad_accumulate(self.shape, self_grad)
                 self.backward(self_grad, child)
             
             if val.requires_grad:
                 val_grad = input_grad * self.data
-                val_grad = self._broadcasted_grad_accumulate(val, val_grad)
+                val_grad = self._broadcasted_grad_accumulate(val.shape, val_grad)
                 val.backward(val_grad, child)
 
         requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
@@ -444,12 +443,12 @@ class Tensor:
         def _div_backward(input_grad, child):
             if self.requires_grad:
                 self_grad = input_grad / val.data
-                self_grad = self._broadcasted_grad_accumulate(self, self_grad)
+                self_grad = self._broadcasted_grad_accumulate(self.shape, self_grad)
                 self.backward(self_grad, child)
 
             if val.requires_grad:
                 val_grad = input_grad * -1 * self.data / (val.data**2)
-                val_grad = self._broadcasted_grad_accumulate(val, val_grad)
+                val_grad = self._broadcasted_grad_accumulate(val.shape, val_grad)
                 val.backward(val_grad, child)
         
         ### Convert to Tensor ###
