@@ -6,6 +6,7 @@ import mytorch.nn as nn
 import mytorch.optim as optim
 from tiny_gpt2 import GPT2
 from transformers import GPT2TokenizerFast
+import wandb
 
 ### MODEL PARAMETERS ###
 CONTEXT_LENGTH = 256
@@ -17,8 +18,8 @@ MLP_RATIO = 4
 PATH_TO_DATA = "../../data/harry_potter_txt"
 
 ### TRAINING PARAMETERS ###
-TRAINING_ITERATIONS = 50000
-BATCH_SIZE = 32
+TRAINING_ITERATIONS = 25000
+BATCH_SIZE = 64
 MAX_LEARNING_RATE = 3e-4
 MIN_LEARNING_RATE = 5e-5
 WARMUP_STEPS = 5000
@@ -27,13 +28,29 @@ MAX_GRAD_NORM = 1.0
 GRADIENT_ACCUMULATION_STEPS = 1
 
 ### LOGGING PARAMETERS ###
-LOG_ITER = 100
+LOG_ITER = 25
 GEN_ITER = 1000
 SAMPLE_GEN_SEED = "Spells "
 GEN_LENGTH = 256
 
 ### SAVE WEIGHTS PARAMETERS ###
 SAVE_PATH =  "work_dir/mini_gpt2_harry_potter.safetensors"
+
+### INITIALIZE WANDB ###
+wandb.init(
+    project="autograd_tiny_gpt2_harry_potter",
+    name="mini_gpt2_run",
+    config={
+        "context_length": CONTEXT_LENGTH,
+        "embed_dim": EMBED_DIM,
+        "num_heads": NUM_HEADS,
+        "num_blocks": NUM_BLOCKS,
+        "dropout": DROPOUT_P,
+        "batch_size": BATCH_SIZE,
+        "learning_rate": MAX_LEARNING_RATE,
+        "weight_decay": WEIGHT_DECAY
+    }
+)
 
 ### PREPARE DATASET ###
 def get_text_data(path_to_data):
@@ -166,6 +183,9 @@ def generate_sample(starting_text=SAMPLE_GEN_SEED,
     print(generated)
     print("-----------------")
 
+    return generated
+
+
 for iter in tqdm(range(TRAINING_ITERATIONS)):
 
     logits, targets, loss = train_step()
@@ -174,9 +194,15 @@ for iter in tqdm(range(TRAINING_ITERATIONS)):
         accuracy = (logits.argmax(dim=-1).reshape(-1) == targets).sum() / len(targets) * 100
         print(f"Iteration {iter}, Loss: {loss.item():.4f}, Accuracy: {accuracy.item():.2f}%, LR: {scheduler.get_last_lr():.6f}")
 
+        wandb.log({"loss": loss.item(), "lr": scheduler.get_last_lr()}, step=iter)
+
     if iter % GEN_ITER == 0:
+
         model.eval()
-        generate_sample()
+
+        generated_text = generate_sample()
+        wandb.log({"sample_text": generated_text}, step=iter)
+
         model.train()
 
 ### Save Model ###

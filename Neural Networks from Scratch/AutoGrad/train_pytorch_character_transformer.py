@@ -68,54 +68,55 @@ seq_len = 256
 model = TransformerModel(
     vocab_size=vocab_size,
     embed_dim=384,
-    max_seq_len=256,
+    max_seq_len=seq_len,
     num_heads=6,
     num_layers=6,
     dropout_p=0.1,
     dim_mult=4
 ).cuda()
-causal_mask = torch.triu(torch.ones(seq_len, seq_len) * float('-inf'), diagonal=1).cuda()
-loss_fn = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.0002)
+print(model)
+# causal_mask = torch.triu(torch.ones(seq_len, seq_len) * float('-inf'), diagonal=1).cuda()
+# loss_fn = nn.CrossEntropyLoss()
+# optimizer = optim.Adam(model.parameters(), lr=0.0002)
 
-# 6. Training loop
-model.train()
-train_iterations = 5000
-batch_size = 32
-
-for epoch in tqdm(range(train_iterations)):
-    inputs, targets = get_batch(data, batch_size, seq_len)
+# #6. Training loop
+# training_iterations = 5000
+# batch_size = 32
+# for epoch in tqdm(range(training_iterations)):
+#     inputs, targets = get_batch(data, batch_size, seq_len)
     
-    # Forward
-    logits = model(inputs, causal_mask)
-    loss = loss_fn(logits, targets.view(-1))  # Flatten targets to (batch_size * seq_len,)
+#     # Forward
+#     logits = model(inputs, causal_mask)
+#     loss = loss_fn(logits, targets.view(-1))  # Flatten targets to (batch_size * seq_len,)
     
-    # Backward
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
+#     # Backward
+#     optimizer.zero_grad()
+#     loss.backward()
+#     optimizer.step()
     
-    if epoch % 100 == 0:
-        preds = torch.argmax(logits, dim=-1)
-        accuracy = (preds == targets.view(-1)).float().mean().item() * 100
-        print(f"Epoch {epoch}, Loss: {loss.item():.4f}, Accuracy: {accuracy:.2f}%")
+#     if epoch % 100 == 0:
+#         preds = torch.argmax(logits, dim=-1)
+#         accuracy = (preds == targets.view(-1)).float().mean().item() * 100
+#         print(f"Epoch {epoch}, Loss: {loss.item():.4f}, Accuracy: {accuracy:.2f}%")
 
-# 8. Inference
-model.eval()
-seed = torch.tensor([[char_to_idx['h']]], dtype=torch.long).cuda()
-generated = [seed.item()]
 
-with torch.no_grad():
-    for _ in range(seq_len):
-        curr_len = seed.size(1)
-        causal_mask = torch.triu(torch.ones(curr_len, curr_len) * float('-inf'), diagonal=1).cuda()
-        logits = model(seed, causal_mask)
-        last_logits = logits[-1]  # Last position logits
+
+# # 8. Inference
+# model.eval()
+# seed = torch.tensor([[char_to_idx['h']]], dtype=torch.long).cuda()
+# generated = [seed.item()]
+
+# with torch.no_grad():
+#     for _ in range(seq_len):
+#         curr_len = seed.size(1)
+#         causal_mask = torch.triu(torch.ones(curr_len, curr_len) * float('-inf'), diagonal=1).cuda()
+#         logits = model(seed, causal_mask)
+#         last_logits = logits[-1]  # Last position logits
         
-        # Softmax and sampling
-        probs = torch.softmax(last_logits, dim=-1).cpu().numpy()
-        next_token = np.random.choice(vocab_size, size=1, p=probs)[0]
-        generated.append(next_token)
-        seed = torch.tensor([generated], dtype=torch.long).cuda()
-
-print("".join([idx_to_char[i] for i in generated]))
+#         # Softmax and sampling
+#         probs = torch.softmax(last_logits, dim=-1).cpu().numpy()
+#         next_token = np.random.choice(vocab_size, size=1, p=probs)[0]
+#         generated.append(next_token)
+#         seed = torch.tensor([generated], dtype=torch.long).cuda()
+        
+# print("".join([idx_to_char[i] for i in generated]))
