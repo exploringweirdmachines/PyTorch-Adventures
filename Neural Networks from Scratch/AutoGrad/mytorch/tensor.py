@@ -54,10 +54,12 @@ class Tensor:
         ### Container to Store Children (output) of Every Operation ###
         ### (i.e. if we add tensor A and B to create C, C is the child of A and child of B) ###
         self.children = []
+
+        self.is_leaf = self.requires_grad and (grad_fn is None)
         
         ### If we actually want to store gradient, Initialize with Zeros ###
         if self.requires_grad:
-            self.grad = cp.zeros_like(self.data, dtype=cp.float32)
+            self.grad = None
 
     def __repr__(self):
         if self.grad_fn_name is None:
@@ -146,7 +148,7 @@ class Tensor:
                 assert (x_dim == grad_dim)
 
         return x_grad
-        
+    
     def backward(self, input_grad=None, child=None):
         
         ### During inference the output has no grads, you cant call backward on this ###
@@ -164,6 +166,10 @@ class Tensor:
             ### Accumulate Gradients ###
             if not input_grad.flags.c_contiguous:
                 input_grad = cp.ascontiguousarray(input_grad)
+
+            ### If self.grad is None, allocate memory ###
+            if self.grad is None:
+                self.grad = cp.zeros_like(self.data, dtype=cp.float32)
             self.grad += input_grad
 
             ### We are exhausting this backprop path from "child", so we can pop child out ###

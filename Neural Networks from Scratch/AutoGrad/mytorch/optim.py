@@ -14,7 +14,7 @@ class SGD:
     def zero_grad(self):
         for param in self.parameters:
             if param.requires_grad:
-                param.grad = 0
+                param.grad = None
 
 class Adam:
     def __init__(self, parameters, lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0):
@@ -60,7 +60,7 @@ class Adam:
 
     def zero_grad(self):
         for p in self.params:
-            p.grad.fill(0)
+            p.grad = None
 
 class AdamW:
     def __init__(self, parameters, lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.01):
@@ -108,4 +108,4 @@ class AdamW:
 
     def zero_grad(self):
         for p in self.params:
-            p.grad.fill(0)
+            p.grad = None
