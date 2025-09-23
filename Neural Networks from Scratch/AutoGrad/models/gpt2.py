@@ -1,15 +1,7 @@
 import cupy as cp
 import mytorch.nn as nn
 
-USE_AUTO_METHODS = False
 
-### SET LAYERS BASED ON AUTO or SEMI-AUTOGRAD ###
-if USE_AUTO_METHODS:
-    nn.Linear = nn.AutoLinear
-    nn.LayerNorm = nn.AutoLayerNorm
-    nn.ReLU = nn.AutoReLU
-    nn.Softmax = nn.AutoSoftmax
-    nn.CrossEntropyLoss = nn.AutoCrossEntropyLoss
 
 class Embeddings(nn.Module):
 
