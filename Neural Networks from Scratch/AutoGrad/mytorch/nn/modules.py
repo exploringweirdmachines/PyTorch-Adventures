@@ -301,6 +301,36 @@ class Conv2d(Module):
     def forward(self, x: Tensor):
         return F.conv2d(x, self.W, self.b, self.stride, self.padding)
     
+class MaxPool2d(Module):
+    def __init__(self, kernel_size, stride=None, padding=0):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+
+    def __call__(self, x):
+        return self.forward(x)
+
+    def __repr__(self):
+        args = [f"kernel_size=({self.kernel_size}, {self.kernel_size})"]
+        
+        if self.stride != self.kernel_size:
+            args.append(f"stride=({self.stride}, {self.stride})")
+        if self.padding != 0:
+            args.append(f"padding=({self.padding}, {self.padding})")
+    
+        return "MaxPool2d(" + ", ".join(args) + ")"
+    
+    def _extra_repr(self):
+        return (
+            f"kernel_size=({self.kernel_size}, {self.kernel_size}), "
+            f"stride=({self.stride}, {self.stride}), "
+            f"padding=({self.padding}, {self.padding})"
+        )
+
+    def forward(self, x):
+        return F.maxpool2d(x, self.kernel_size, self.stride, self.padding)
+    
 ############################
 ### NORMALIZATION LAYERS ###
 ############################

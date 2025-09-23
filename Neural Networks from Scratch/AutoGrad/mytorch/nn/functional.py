@@ -449,7 +449,7 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
         Lets look at the last one:
 
         j[:, -1] = [2 2 3 3]
-        k[:, -1] = [2 3 2 3]
+        j[:, -1] = [2 3 2 3]
 
         The combination gives:
 
@@ -457,16 +457,49 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
 
         That is our bottom right patch!
 
+        Of course we dont have just one patch but we have the same patch across the batch dimension.
+        Lets pretend our C_in is 3
+
+        For this we create:
+        k = cp.repeat(cp.arange(C_in), K*K).reshape(-1,1)
+
+        This tells us for the first 4 positions (in our 2x2 kernel) they go to channel 0, 
+        the second 4 positions (in our 2x2 kernel) goes to channel 1, etc...
+        [0 0 0 0 1 1 1 1 2 2 2 2]
+
+        This is a tensor that repeats 0 to num_channels, for each value in our kernel, as if our 
+        kernel is 2 x 2, and we have C_in channels, that means we have C_in channels for each of 
+        those 2 x 2 kernels!
+
+        Next we create:
+        kk_per_batch = cp.repeat(k.reshape(-1), num_p)
+
+        We have our k from above for every single patch of 2x2, so repeat it again for all patches. If we had 
+        2 patches it would just repeat again:
+
+        This tell us the first 4 positions belong to the first 2x2 kernel patch and is in channel 0. The second
+        4 positions belong to the second 2x2 kernel patch and is also in channel 0, etc...
+        [ 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 ]
+
+        Lastly, we want to tile this whole operation on the batch dimension, so if we had a batch of 2 we would get:
+        kk_flat = cp.tile(kk_per_batch, B)
+        [ 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 ]
+
         Therefore this is our annoying indexing. The reason we care is because we 
         can now use a faster cp.add.at method:
 
-        For every sample in the batch:
-            grad_input[b] is tensor we want to accumulate grads into
-            (k,i,j) is the (channel x height x width) index combinations we want to accumulate into
-            grad_cols[b].T will be the actual values we want to grab to accumulte them
+        Similarly, we need to tile our i and j indices to also repeat over the batch dimension, we can use tile for that:
+        ii_flat = cp.tile(i.reshape(-1), B)
+        jj_flat = cp.tile(j.reshape(-1), B)
+
+
+        # For every sample in the batch:
+        #     grad_input[b] is tensor we want to accumulate grads into
+        #     (k,i,j) is the (channel x height x width) index combinations we want to accumulate into
+        #     grad_cols[b].T will be the actual values we want to grab to accumulte them
         
-        for b in range(B):
-            cp.add.at(grad_input[b], (k, i, j), grad_cols[b].T)
+        # for b in range(B):
+        #     cp.add.at(grad_input[b], (k, i, j), grad_cols[b].T)
 
 
         """
@@ -501,6 +534,16 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
             ### Create empty tensor to accumulate grads into ###
             grad_input = cp.zeros_like(x_padded, dtype=cp.float32)
 
+            ### Compute Flattened Values and Indices for Vectorized add.at ###
+            num_k = C_in * K * K
+            num_p = H_out * W_out
+
+            ### Flatten Values in order of Batches and then Kernels and then Patches ###
+            values_flat = grad_cols.transpose(0,2,1).reshape(-1)
+
+            # Batch indices: repeat each b for all its kernel-patch pairs
+            bb_flat = cp.repeat(cp.arange(B), num_k * num_p)
+
             ### Do the indexing op as described above ###
             i0 = cp.repeat(cp.arange(K), K)
             i0 = cp.tile(i0, C_in)
@@ -509,11 +552,19 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
             j1 = S * cp.tile(cp.arange(W_out), H_out)
             i = i0.reshape(-1,1) + i1.reshape(1,-1)
             j = j0.reshape(-1,1) + j1.reshape(1,-1)
-            k = cp.repeat(cp.arange(C_in), K*K).reshape(-1,1)
+            k = cp.repeat(cp.arange(C_in), K*K)
+         
+            ### Channel Indices: Repeat each K for its patches and then tile over batches ###
+            kk_per_batch = cp.repeat(k, num_p)
+            kk_flat = cp.tile(kk_per_batch, B)
 
-            ### add.at is basically += to accumulate in ###
-            for b in range(B):
-                cp.add.at(grad_input[b], (k, i, j), grad_cols[b].T)
+            ### Repeat Row and Col indices for every sample in batch too ###
+            ii_flat = cp.tile(i.reshape(-1), B)
+            jj_flat = cp.tile(j.reshape(-1), B)
+
+            # print(bb_flat.shape, kk_flat.shape, ii_flat.shape, jj_flat.shape, values_flat.shape, grad_input.shape)
+            # (147456,) (147456,) (147456,) (147456,) (147456,) (16, 256, 6, 6) and 16x256x6x6 = 147456
+            cp.add.at(grad_input, (bb_flat, kk_flat, ii_flat, jj_flat), values_flat)
 
             ### Remove padding that didnt exist before the conv ###
             if P > 0:
@@ -536,6 +587,190 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
         bias._add_child(output)
 
     return output       
+
+def maxpool2d(input, kernel_size, stride=None, padding=0):
+    
+    """
+    MaxPool2d using im2col + argmax. Supports manual backward.
+
+    input: Tensor of shape (B, C, H, W)
+    kernel_size: int or tuple
+    stride: int or tuple
+    padding: int
+    """
+
+    ### Get all of our sizes ###
+    B, C, H, W = input.data.shape
+    K_h = K_w = kernel_size
+    S_h = S_w = stride or kernel_size # Stride = Kernel size unless provided
+    P = padding
+
+    ### Get output size ###
+    H_out = (H + 2*P - K_h)//S_h + 1
+    W_out = (W + 2*P - K_w)//S_w + 1
+
+    ### Pad input if needed ###
+    if P > 0:
+        x_padded = cp.pad(input.data, ((0,0),(0,0),(P,P),(P,P)), mode='constant', constant_values=-cp.inf)
+    else:
+        x_padded = input.data
+
+    ### Im2Col Algorithm ###
+    # --- im2col ---
+    shape = (B, C, K_h, K_w, H_out, W_out)
+    strides = (
+        x_padded.strides[0],
+        x_padded.strides[1],
+        x_padded.strides[2],
+        x_padded.strides[3],
+        S_h * x_padded.strides[2],
+        S_w * x_padded.strides[3],
+    )
+    cols = cp.lib.stride_tricks.as_strided(x_padded, shape=shape, strides=strides)
+    cols_flat = cols.reshape(B, C, K_h*K_w, H_out*W_out)
+
+    ### Forward: Get the max values and their indexes ###
+    ### Basically, out of the K_h*K_w possibilities, just ###
+    ### grab the largest one and its index! ###
+    max_idx = cp.argmax(cols_flat, axis=2)
+    out = cp.max(cols_flat, axis=2).reshape(B, C, H_out, W_out)
+
+    def _maxpool2d_backward(grad_outputs, child):
+        
+        """
+        All we have to do is copy grads from the output to its index back in the original 
+        tensor! For example, lets say we had the tensor:
+
+        [1,5,2]
+
+        if we did Max we would select 5, and its at index 1.
+
+        This means during backprop our gradient will go to the 5 location and be 0 elsewhere
+        as the other values didnt contribute to the gradient. So whatever grad flowed back
+        to our 5 value, gets copied in with 0 everywhere else. 
+
+        In our case, we have our data in the shape of (B x C x Kh*Kw x H_out*W_out). In that
+        set of Kh*Kw, one of them contributed to the gradient (the max one) and the rest is 0. 
+        So to do this all we need to do is index every possible B, C, and H_out*W_out, and then 
+        also index for the specific K that was max!
+
+        Easiest way is to use meshgrid:
+        
+        meshgrid is a function used to create a rectangular 
+        grid out of two or more one-dimensional arrays representing coordinate values.
+
+        For example. Lets say we have a 2d matrix of size (5 x 5). The height goes from 0 to 4
+        and the width goes from 0 to 4, and I want every combination of points that give me the entire
+        space. For example [(0,0), (0,1), (0,2), (0,3), ... (4,4)]
+
+        We could use a for loop, or we can just use meshgrid:
+
+        ```
+        import cupy as cp
+
+        H_idx, W_idx = cp.meshgrid(
+            cp.arange(5), cp.arange(5), indexing='ij'
+        )
+
+        print(H_idx)
+        
+        [[0 0 0 0 0]
+        [1 1 1 1 1]
+        [2 2 2 2 2]
+        [3 3 3 3 3]
+        [4 4 4 4 4]]
+ 
+        print(W_idx)
+
+        [[0 1 2 3 4]
+        [0 1 2 3 4]
+        [0 1 2 3 4]
+        [0 1 2 3 4]
+        [0 1 2 3 4]]
+
+        ```
+
+        Well in our case we have dimensions: 
+
+        B -> 0 to num samples in batch
+        C -> 0 to num channels in inputs
+        H_out*W_out -> 0 to num patches in our output
+
+        And all that is left is to index K from K_h*K_w, which 
+        we already know is the max k!
+
+        
+        """
+        ### Create Empty Grad to Populate in the shape of (B, C, K_h*K_w, H_out*W_out)###
+        grad_cols = cp.zeros_like(cols_flat, dtype=cp.float32)
+
+        ### Get Indexes ###
+        B_idx, C_idx, N_idx = cp.meshgrid(
+            cp.arange(B), cp.arange(C), cp.arange(H_out*W_out), indexing="ij"
+        )
+
+        ### Use Indexes to Copy all grad_outputs into our grad_cols ###
+        ### Our data is (B x C x K_h*K_w x H_out*W_out) but we are indexing ###
+        ### for a specific k (the max index) so our shape we are copying into will ###
+        ### be (B x C x H_out*W_out), so we need to make sure our grad_outputs are ###
+        ### also flattened into that shape! ###
+        grad_cols[B_idx, C_idx, max_idx, N_idx] = grad_outputs.reshape(B, C, -1)
+
+        ### Now that we have our gradients, remember that we could have overlapping kernels ###
+        ### Just like we did in our Conv2d above, we need to accumulate all of this into our ###
+        ### grad input, this code is identical to above ###
+
+        # Col2im to accumulate into grad_input
+        grad_input = cp.zeros_like(x_padded, dtype=cp.float32)
+
+        i0 = cp.repeat(cp.arange(K_h), K_w)
+        i0 = cp.tile(i0, C)
+        i1 = S_h * cp.repeat(cp.arange(H_out), W_out)
+        j0 = cp.tile(cp.arange(K_w), K_h * C)
+        j1 = S_w * cp.tile(cp.arange(W_out), H_out)
+        i = i0.reshape(-1,1) + i1.reshape(1,-1)
+        j = j0.reshape(-1,1) + j1.reshape(1,-1)
+        k = cp.repeat(cp.arange(C), K_h*K_w).reshape(-1,1)
+
+        ### Vectorized over batch ###
+        num_k = C * K_h * K_w
+        num_p = H_out * W_out
+
+        # Reshape grad_cols to (B, num_k, num_p)
+        grad_values = grad_cols.reshape(B, num_k, num_p)
+
+        # Values flattened in row-major order
+        values_flat = grad_values.reshape(-1)
+
+        # Batch indices: repeat each b for num_k * num_p times
+        bb_flat = cp.repeat(cp.arange(B), num_k * num_p)
+
+        # Channel indices: repeat each k for num_p times, then tile over B
+        kk_per_batch = cp.repeat(k.reshape(-1), num_p)
+        kk_flat = cp.tile(kk_per_batch, B)
+
+        # Row and col indices: flatten row-major, then tile over B
+        ii_flat = cp.tile(i.reshape(-1), B)
+        jj_flat = cp.tile(j.reshape(-1), B)
+
+        ### Single vectorized addition ###
+        cp.add.at(grad_input, (bb_flat, kk_flat, ii_flat, jj_flat), values_flat)
+
+        if P > 0:
+            grad_input = grad_input[:, :, P:-P, P:-P]
+
+        input.backward(grad_input, child)
+
+    requires_grad = input.requires_grad
+    output = Tensor(
+        out,
+        requires_grad=requires_grad,
+        grad_fn=_maxpool2d_backward if requires_grad else None,
+        grad_fn_name="<MaxPool2dBackward>" if requires_grad else None
+    )
+
+    input._add_child(output)
+    return output
 
 def embedding(indices, weight):
     """
@@ -732,7 +967,6 @@ def batchnorm(input, gamma, beta,
     beta._add_child(output)
     
     return output
-
 
 def sigmoid(x, auto=False):
 
