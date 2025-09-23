@@ -2,6 +2,14 @@ import numpy as np
 import threading
 import queue
 
+class Dataset:
+    def __init__(self):
+        raise NotImplementedError
+    def __len__(self):
+        raise NotImplementedError
+    def __getitem__(self, idx):
+        raise NotImplementedError
+    
 class DataLoader:
     """
     Minimal multithreaded DataLoader with optional collate function.

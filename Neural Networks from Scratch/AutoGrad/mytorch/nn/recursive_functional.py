@@ -1,6 +1,6 @@
 """
 Functional access for all our Ops! This uses 
-the topological sort backward method of Tensor
+the recursive backward method of Tensor
 
 For some operations:
 auto=True indicates that we will use our autograd 
@@ -9,7 +9,7 @@ can manually define them as well which is auto=False
 """
 import numpy as np
 import cupy as cp
-from ..tensor import Tensor
+from ..recursive_tensor import Tensor
 
 def linear(input, weight, bias=None, auto=False):
 
@@ -22,7 +22,7 @@ def linear(input, weight, bias=None, auto=False):
     W: (I,O)
     b: (O,)
     """
-
+ 
     ### Normally data is in the shape of (N x I)
     reshaped = False
     *dims, in_features = input.shape
@@ -67,7 +67,7 @@ def linear(input, weight, bias=None, auto=False):
             output = output.reshape(*dims, -1)
 
         ### BACKWARD PASS ###
-        def _linear_backward(grad_output):
+        def _linear_backward(grad_output, child):
 
             ### Our gradients are coming in the shape of (*, O) ###
             ### But our operation happened in the shape of (N x O) ###
@@ -78,16 +78,12 @@ def linear(input, weight, bias=None, auto=False):
             ### Standard Weight Update formula ###
             if weight.requires_grad:
                 grad_W = cp.matmul(input_cp.T, grad_output)
-                if weight.grad is None:
-                    weight.grad = cp.zeros_like(weight.data, dtype=cp.float32)
-                weight.grad += grad_W
+                weight.backward(grad_W, child)
             
             ### Standard Bias Update Formula ###
             if bias is not None and bias.requires_grad:
                 grad_b = grad_output.sum(axis=0)
-                if bias.grad is None:
-                    bias.grad = cp.zeros_like(bias.data, dtype=cp.float32)
-                bias.grad += grad_b
+                bias.backward(grad_b, child)
             
             ### Grad to Input ###
             if input.requires_grad:
@@ -95,10 +91,7 @@ def linear(input, weight, bias=None, auto=False):
                 
                 ### Reshape grad_input back to input feature shape (* x I) ###
                 grad_input = grad_input.reshape(*dims, in_features)
-                
-                if input.grad is None:
-                    input.grad = cp.zeros_like(input.data, dtype=cp.float32)
-                input.grad += grad_input
+                input.backward(grad_input, child)
         
         requires_grad = input.requires_grad or weight.requires_grad or \
                             (bias is not None and bias.requires_grad)
@@ -109,10 +102,12 @@ def linear(input, weight, bias=None, auto=False):
             grad_fn=_linear_backward if requires_grad else None,
             grad_fn_name="<LinearBackward>" if requires_grad else None
         )
+    
+        input._add_child(output)
+        weight._add_child(output)
+        if bias:
+            bias._add_child(output)
 
-        if requires_grad:
-            output._add_parents(input, weight, bias)
-            
         return output
  
 def conv2d(input, weight, bias=None, stride=1, padding=0):
@@ -217,7 +212,7 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
     #### Reshape back to (B x C_out x H_out x W_out) ###
     output = output.reshape(B, H_out*W_out, C_out).transpose(0,2,1).reshape(B, C_out, H_out, W_out)
 
-    def _conv2d_backward(grad_output):
+    def _conv2d_backward(grad_output, child):
 
         """
         Input (1x4x4): (simple one channel input)
@@ -521,17 +516,11 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
             ### Remeber our weights are actually in the shape of (C_out x C_in x K x K), so ###
             ### we need a transpose first to (C_in*K*K x C_out) -> (C_out x C_in*K*K) -> (C_out, C_in, K, K) ###
             grad_W = grad_W.T.reshape(C_out, C_in, K, K)
-
-            if weight.grad is None:
-                weight.grad = cp.zeros_like(weight.data, dtype=cp.float32)
-            weight.grad += grad_W
+            weight.backward(grad_W, child)
         
         if bias is not None and bias.requires_grad:
             grad_b = grad_output_flat.sum(axis=0)
-            
-            if bias.grad is None:
-                bias.grad = cp.zeros_like(bias.data, dtype=cp.float32)
-            bias.grad += grad_b
+            bias.backward(grad_b, child)
 
         # Input gradient
         if input.requires_grad:
@@ -582,9 +571,7 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
             if P > 0:
                 grad_input = grad_input[:, :, P:-P, P:-P]
 
-            if input.grad is None:
-                input.grad = cp.zeros_like(input.data, dtype=cp.float32)
-            input.grad += grad_input
+            input.backward(grad_input, child)
 
     requires_grad = input.requires_grad or weight.requires_grad or \
                             (bias is not None and bias.requires_grad)
@@ -596,10 +583,11 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
         grad_fn_name="<Conv2dBackward>" if requires_grad else None
     )
 
-    
-    if requires_grad:
-        output._add_parents(input, weight, bias)
-        
+    input._add_child(output)
+    weight._add_child(output)
+    if bias:
+        bias._add_child(output)
+
     return output       
 
 def maxpool2d(input, kernel_size, stride=None, padding=0):
@@ -649,7 +637,7 @@ def maxpool2d(input, kernel_size, stride=None, padding=0):
     max_idx = cp.argmax(cols_flat, axis=2)
     out = cp.max(cols_flat, axis=2).reshape(B, C, H_out, W_out)
 
-    def _maxpool2d_backward(grad_outputs):
+    def _maxpool2d_backward(grad_outputs, child):
         
         """
         All we have to do is copy grads from the output to its index back in the original 
@@ -773,9 +761,7 @@ def maxpool2d(input, kernel_size, stride=None, padding=0):
         if P > 0:
             grad_input = grad_input[:, :, P:-P, P:-P]
 
-        if input.grad is None:
-            input.grad = cp.zeros_like(input.data, dtype=cp.float32)
-        input.grad += grad_input
+        input.backward(grad_input, child)
 
     requires_grad = input.requires_grad and Tensor.build_graph_enabled()
     output = Tensor(
@@ -785,9 +771,7 @@ def maxpool2d(input, kernel_size, stride=None, padding=0):
         grad_fn_name="<MaxPool2dBackward>" if requires_grad else None
     )
 
-    if requires_grad:
-        output._add_parents(input)
-
+    input._add_child(output)
     return output
 
 def embedding(indices, weight):
@@ -864,7 +848,7 @@ def layernorm(input, gamma, beta, eps=1e-5, auto=False):
         ### Reshape Back if Needed ###
         output = output.reshape(*dims, embed_dim)
 
-        def _layernorm_backward(grad_output):
+        def _layernorm_backward(grad_output, child):
             
             ### Reshape Grad Output as its currently (*, I) ###
             if reshaped:
@@ -872,18 +856,11 @@ def layernorm(input, gamma, beta, eps=1e-5, auto=False):
 
             if gamma.requires_grad:
                 grad_gamma = cp.sum(grad_output * norm_x, axis=0)
-
-                if gamma.grad is None:
-                    gamma.grad = cp.zeros_like(gamma.data, dtype=cp.float32)
-                gamma.grad += grad_gamma
-            
+                gamma.backward(grad_gamma, child)
             
             if beta.requires_grad:
                 grad_beta = cp.sum(grad_output, axis=0)
-                
-                if beta.grad is None:
-                    beta.grad = cp.zeros_like(beta.data, dtype=cp.float32)
-                beta.grad += grad_beta
+                beta.backward(grad_beta, child)
 
             if input.requires_grad:
                 grad_norm = grad_output * gamma_cp
@@ -895,9 +872,7 @@ def layernorm(input, gamma, beta, eps=1e-5, auto=False):
                 if reshaped:
                     grad_input = grad_input.reshape(*dims, embed_dim)
 
-                if input.grad is None:
-                    input.grad = cp.zeros_like(input.data, dtype=cp.float32)
-                input.grad += grad_input
+                input.backward(grad_input, child)
 
         requires_grad = input.requires_grad or gamma.requires_grad or beta.requires_grad
         requires_grad = requires_grad and Tensor.build_graph_enabled()
@@ -908,8 +883,9 @@ def layernorm(input, gamma, beta, eps=1e-5, auto=False):
             grad_fn_name="<LayerNormBackward>" if requires_grad else None
         )
 
-        if requires_grad:
-            output._add_parents(input, gamma, beta)
+        input._add_child(output)
+        gamma._add_child(output)
+        beta._add_child(output)
 
         return output         
 
@@ -954,22 +930,18 @@ def batchnorm(input, gamma, beta,
     if reshaped:
         out_data = out_data.reshape(N,C,*dims)
 
-    def _batchnorm_backward(grad_output):
+    def _batchnorm_backward(grad_output, child):
 
         ### Reshape Grad from (N,C,*) to (N,C,-1) ###
         grad_output = grad_output.reshape(N,C,-1)
 
         if gamma.requires_grad:
             grad_gamma = cp.sum(grad_output * norm_x, axis=(0, 2))
-            if gamma.grad is None:
-                gamma.grad = cp.zeros_like(gamma.data, dtype=cp.float32)
-            gamma.grad += grad_gamma
+            gamma.backward(grad_gamma, child)
 
         if beta.requires_grad:
             grad_beta = cp.sum(grad_output, axis=(0, 2))
-            if beta.grad is None:
-                beta.grad = cp.zeros_like(beta.data, dtype=cp.float32)
-            beta.grad += grad_beta
+            beta.backward(grad_beta, child)
 
         if input.requires_grad:
             grad_norm = grad_output * gamma_cp
@@ -984,9 +956,7 @@ def batchnorm(input, gamma, beta,
             else:
                 grad_input = grad_input.reshape(N,C)
             
-            if input.grad is None:
-                input.grad = cp.zeros_like(input.data, dtype=cp.float32)
-            input.grad += grad_input
+            input.backward(grad_input, child)
 
     requires_grad = input.requires_grad or gamma.requires_grad or beta.requires_grad
     requires_grad = requires_grad and Tensor.build_graph_enabled()
@@ -997,8 +967,9 @@ def batchnorm(input, gamma, beta,
         grad_fn_name="<BatchNormBackward>" if requires_grad else None
     )
 
-    if requires_grad:
-        output._add_parents(input, gamma, beta)
+    input._add_child(output)
+    gamma._add_child(output)
+    beta._add_child(output)
     
     return output
 
@@ -1011,11 +982,9 @@ def sigmoid(x, auto=False):
         
         output = 1 / (1 + cp.exp(-x.data))
 
-        def _sigmoid_backward(grad_output):
+        def _sigmoid_backward(grad_output, child):
             grad_input = grad_output * output * (1 - output)
-            if x.grad is None:
-                x.grad = cp.zeros_like(x.data, dtype=cp.float32)
-            x.grad += grad_input
+            x.backward(grad_input, child)
         
         requires_grad = x.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(
@@ -1025,25 +994,25 @@ def sigmoid(x, auto=False):
             grad_fn_name="<SigmoidBackward>" if requires_grad else None
         )
 
-        if requires_grad:
-            output._add_parents(x)
+        x._add_child(output)
 
         return output
 
 def relu(x, auto=False):
+    
     if auto:
+
         mask = Tensor(cp.where(x.data < 0, 0, 1).astype(cp.float32))
         return x * mask
-    else:
-  
-        out_data = cp.maximum(x.data, 0, out=cp.empty_like(x.data))
 
-        def _relu_backward(input_grad):
-            if x.requires_grad:
-                grad_input = input_grad * (x.data > 0)
-                if x.grad is None:
-                    x.grad = cp.zeros_like(x.data, dtype=cp.float32)
-                x.grad += grad_input
+    else:
+
+        mask = (x.data > 0).astype(cp.float32)
+        out_data = x.data * mask
+
+        def _relu_backward(grad_output, child):
+            grad_input = grad_output * mask
+            x.backward(grad_input, child)
 
         requires_grad = x.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -1053,8 +1022,7 @@ def relu(x, auto=False):
             grad_fn_name="<ReLUBackward>" if requires_grad else None
         )
 
-        if requires_grad:
-            out._add_parents(x)
+        x._add_child(out)
 
         return out
     
@@ -1076,18 +1044,15 @@ def gelu(x):
     out_data = 0.5 * x.data * (1.0 + tanh_out)
 
     # Backward
-    def _gelu_backward(grad_output):
+    def _gelu_backward(grad_output, child):
 
-        if x.requires_grad:
-            # derivative of GELU approximation (sech^2(x) = 1 - tanh^2(x))
-            sech2 = 1 - cp.power(tanh_out, 2)  # derivative of tanh
-            inner_grad = sqrt_2_over_pi * (1 + 3 * 0.044715 * cp.power(x.data, 2))
+        # derivative of GELU approximation (sech^2(x) = 1 - tanh^2(x))
+        sech2 = 1 - cp.power(tanh_out, 2)  # derivative of tanh
+        inner_grad = sqrt_2_over_pi * (1 + 3 * 0.044715 * cp.power(x.data, 2))
 
-            grad_input = 0.5 * (1.0 + tanh_out + x.data * sech2 * inner_grad) * grad_output
+        grad_input = 0.5 * (1.0 + tanh_out + x.data * sech2 * inner_grad) * grad_output
 
-            if x.grad is None:
-                x.grad = cp.zeros_like(x.data, dtype=cp.float32)
-            x.grad += grad_input
+        x.backward(grad_input, child)
 
     requires_grad = x.requires_grad and Tensor.build_graph_enabled()
     out = Tensor(
@@ -1097,8 +1062,7 @@ def gelu(x):
         grad_fn_name="<GELUBackward>" if requires_grad else None
     )
 
-    if requires_grad:
-        out._add_parents(x)
+    x._add_child(out)
 
     return out
 
@@ -1122,7 +1086,7 @@ def softmax(x, dim=-1, auto=False):
         out_data = exp_x / sum_exp
 
         # Define manual backward
-        def _softmax_backward(grad_output):
+        def _softmax_backward(grad_output, child):
             grad_output = cp.ascontiguousarray(grad_output)
 
             if x.requires_grad:
@@ -1130,21 +1094,18 @@ def softmax(x, dim=-1, auto=False):
                 s = out_data
                 sum_grad_s = cp.sum(grad_output * s, axis=dim, keepdims=True)
                 grad_input = s * (grad_output - sum_grad_s)
-                
-                if x.grad is None:
-                    x.grad = cp.zeros_like(x.data, dtype=cp.float32)
-                x.grad += grad_input
+                x.backward(grad_input, child)
 
+        requires_grad = x.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
             out_data,
-            requires_grad=x.requires_grad,
-            grad_fn=_softmax_backward,
-            grad_fn_name="<SoftmaxBackward>"
+            requires_grad=requires_grad,
+            grad_fn=_softmax_backward if requires_grad else None,
+            grad_fn_name="<SoftmaxBackward>" if requires_grad else None
         )
 
         # Add child to autograd graph
-        if x.requires_grad:
-            out._add_parents(x)
+        x._add_child(out)
 
         return out
 
@@ -1162,7 +1123,7 @@ def cross_entropy(logits, targets, auto=False):
 
     ### Get total flattened dimension ###
     flattened_dim = np.prod(other_dims)
-    
+
     if auto:
 
         ### Flatten Logits ###
@@ -1202,7 +1163,7 @@ def cross_entropy(logits, targets, auto=False):
         nll = -log_softmax[cp.arange(flattened_dim), targets_data]
         loss_value = cp.sum(nll) / flattened_dim
 
-        def _cross_entropy_backward(grad_output):
+        def _cross_entropy_backward(grad_output, child):
             grad_output = float(grad_output)  # scalar from loss
 
             if logits.requires_grad:
@@ -1210,14 +1171,9 @@ def cross_entropy(logits, targets, auto=False):
                 grad_input = cp.exp(log_softmax)  # shape (B, C)
                 grad_input[cp.arange(flattened_dim), targets_data] -= 1
                 grad_input *= grad_output / flattened_dim  # scale by grad_output / batch_size
-                grad_input = grad_input.reshape(logits.shape)
+                logits.backward(grad_input.reshape(*logits.shape), child)
 
-                if logits.grad is None:
-                    logits.grad = cp.zeros_like(logits.data, dtype=cp.float32)
-                logits.grad += grad_input
-                    
-
-        requires_grad = logits.requires_grad
+        requires_grad = logits.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
             cp.array(loss_value, dtype=cp.float32),
             requires_grad=requires_grad,
@@ -1226,9 +1182,7 @@ def cross_entropy(logits, targets, auto=False):
         )
 
         # Add child for autograd
-        if requires_grad:
-            out._add_parents(logits)
-
+        logits._add_child(out)
 
         return out
 
@@ -1242,15 +1196,12 @@ def mse_loss(pred, labels, auto=False):
         diff = pred.data - labels.data
         out_data = (diff**2).mean(axis=0)
 
-        def _mse_backward(grad_output):
+        def _mse_backward(grad_output, child):
             N = diff.shape[0]
             grad_input = (2.0 / N) * diff * grad_output
+            pred.backward(grad_input, child)
 
-            if pred.grad is None:
-                pred.grad = cp.zeros_like(pred.data, dtype=cp.float32)
-            pred.grad += grad_input
-
-        requires_grad = pred.requires_grad
+        requires_grad = pred.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
             out_data,
             requires_grad=requires_grad,
@@ -1258,9 +1209,7 @@ def mse_loss(pred, labels, auto=False):
             grad_fn_name="<MSEBackward>" if requires_grad else None
         )
 
-        if requires_grad:
-            out._add_parents(pred)
-        
+        pred._add_child(out)
         return out
 
     
