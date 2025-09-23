@@ -879,7 +879,11 @@ class Tensor:
         """
         Store references to parent tensors as weakrefs.
         """
-        self._parents = [weakref.ref(p) for p in parents if p is not None]
+
+        if not isinstance(parents, (list, tuple)):
+            parents = [parents]
+
+        self._parents.extend([weakref.ref(p) for p in parents if p is not None])
 
     def item(self):
         if self.data.size != 1:

@@ -257,8 +257,9 @@ class Tensor:
                         grad_fn_name="<AddBackward>" if requires_grad else None)#.astype(cp.float32)
         
         ### This output is the child of the inputs a and b ###
-        self._add_child(output)
-        val._add_child(output)
+        if requires_grad:
+            self._add_child(output)
+            val._add_child(output)
         
         return output
     
@@ -320,8 +321,9 @@ class Tensor:
                         grad_fn_name="<SubBackward>" if requires_grad else None)#.astype(cp.float32)
         
         ### This output is the child of the inputs a and b ###
-        self._add_child(output)
-        val._add_child(output)
+        if requires_grad:
+            self._add_child(output)
+            val._add_child(output)
         
         return output
     
@@ -377,8 +379,9 @@ class Tensor:
                         grad_fn=_mul_backward if requires_grad else None,
                         grad_fn_name="<MulBackward>" if requires_grad else None)#.astype(cp.float32)
         
-        self._add_child(output)
-        val._add_child(output)
+        if requires_grad:
+            self._add_child(output)
+            val._add_child(output)
 
         return output
     
@@ -420,8 +423,9 @@ class Tensor:
             grad_fn_name="<MatmulBackward>" if requires_grad else None
         )
 
-        self._add_child(output)
-        val._add_child(output)
+        if requires_grad:
+            self._add_child(output)
+            val._add_child(output)
 
         return output
         
@@ -464,8 +468,9 @@ class Tensor:
                         grad_fn_name="<DivBackward>" if requires_grad else None)#.astype(cp.float32) 
 
         ### This output is the child of the inputs a and b ###
-        self._add_child(output)
-        val._add_child(output)
+        if requires_grad:
+            self._add_child(output)
+            val._add_child(output)
 
         return output
 
@@ -504,7 +509,8 @@ class Tensor:
                         grad_fn=_pow_backward if requires_grad else None,
                         grad_fn_name="<PowBackward>" if requires_grad else None)#.astype(cp.float32)
         
-        self._add_child(output)
+        if requires_grad:
+            self._add_child(output)
 
         return output
 
@@ -546,7 +552,8 @@ class Tensor:
                         grad_fn=_transpose_backward if requires_grad else None,
                         grad_fn_name="<TransposeBackward>" if requires_grad else None)#.astype(cp.float32)
         
-        self._add_child(output)
+        if requires_grad:
+            self._add_child(output)
 
         return output
     
@@ -570,7 +577,8 @@ class Tensor:
                     grad_fn=_permute_backward if requires_grad else None,
                     grad_fn_name="<PermuteBackward>" if requires_grad else None)#.astype(cp.float32)
         
-        self._add_child(output)
+        if requires_grad:
+            self._add_child(output)
         return output
 
     def exp(self):
@@ -595,7 +603,8 @@ class Tensor:
                         grad_fn=_exp_backward if requires_grad else None, 
                         grad_fn_name="<ExpBackward>" if requires_grad else None)#.astype(cp.float32)
         
-        self._add_child(output)
+        if requires_grad:
+            self._add_child(output)
 
         return output
     
@@ -621,7 +630,8 @@ class Tensor:
                         grad_fn=_log_backward if requires_grad else None, 
                         grad_fn_name="<LogBackward>" if requires_grad else None)#.astype(cp.float32)
         
-        self._add_child(output)
+        if requires_grad:
+            self._add_child(output)
 
         return output
 
@@ -671,7 +681,8 @@ class Tensor:
                         grad_fn=_sum_backward if requires_grad else None,
                         grad_fn_name="<SumBackward>" if requires_grad else None)#.astype(cp.float32)
         
-        self._add_child(output)
+        if requires_grad:
+            self._add_child(output)
 
         return output
     
@@ -736,7 +747,8 @@ class Tensor:
                         grad_fn=_mean_backward if requires_grad else None,
                         grad_fn_name="<MeanBackward>" if requires_grad else None)#.astype(cp.float32)
         
-        self._add_child(output)
+        if requires_grad:
+            self._add_child(output)
 
         return output
     
@@ -796,7 +808,8 @@ class Tensor:
                         grad_fn=_var_backward if requires_grad else None,
                         grad_fn_name="<VarBackward>" if requires_grad else None)#.astype(cp.float32)
 
-        self._add_child(output)
+        if requires_grad:
+            self._add_child(output)
 
         return output
 
@@ -832,7 +845,9 @@ class Tensor:
                     grad_fn=_max_backward if requires_grad else None,
                     grad_fn_name="<MaxBackward>" if requires_grad else None)#.astype(cp.float32)
 
-        self._add_child(output)
+        if requires_grad:
+            self._add_child(output)
+
         return output
     
     def argmax(self, dim=-1):
@@ -875,7 +890,8 @@ class Tensor:
                         grad_fn=_reshape_backward if requires_grad else None, 
                         grad_fn_name="<ReshapeBackward>" if requires_grad else None)
         
-        self._add_child(output)
+        if requires_grad:
+            self._add_child(output)
         
         return output
     
@@ -907,7 +923,9 @@ class Tensor:
                         grad_fn=_index_backward if requires_grad else None,
                         grad_fn_name="<IndexBackward>" if requires_grad else None)#.astype(cp.float32)
         
-        self._add_child(output)
+        if requires_grad:
+            self._add_child(output)
+
         return output
 
     def _toarray(self, input):
@@ -932,15 +950,17 @@ class Tensor:
     #         raise Exception("Children of Tensors must also be a Tensor")
     #     self.children.append(child_tensor)
 
-    def _add_child(self, child_tensor):
+    def _add_child(self, *children):
         """
         Helper function to add a tensor as a child of an operation using Weakreferences
         You can learn more about this here: https://martinheinz.dev/blog/112
         """
-        if not isinstance(child_tensor, Tensor):
-            raise Exception("Children of Tensors must also be a Tensor")
-        self.children.append(weakref.ref(child_tensor))
 
+        if not isinstance(children, (list, tuple)):
+            children = [children]
+
+        self.children.extend([weakref.ref(p) for p in children if p is not None])
+    
     def item(self):
         if self.data.size != 1:
             raise ValueError("only one element tensors can be converted to a Python scalar")

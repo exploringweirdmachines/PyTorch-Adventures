@@ -153,6 +153,38 @@ class ModuleList(Module):
         out += "])"
         return out
 
+class Sequential(Module):
+    def __init__(self, *modules):
+        """
+        Sequential container: applies modules in the order they are passed.
+        Usage:
+            net = Sequential(
+                Linear(10, 20),
+                ReLU(),
+                Linear(20, 5)
+            )
+        """
+        super().__init__()
+        self.layers = ModuleList(modules)  # store in a ModuleList
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+    def __getitem__(self, idx):
+        return self.layers[idx]
+
+    def __len__(self):
+        return len(self.layers)
+
+    def __iter__(self):
+        return iter(self.layers)
+
+    def _extra_repr(self):
+        return ", ".join([layer.__class__.__name__ for layer in self.layers])
+
+
 #######################
 ### STANDARD LAYERS ###
 #######################
@@ -305,7 +337,7 @@ class MaxPool2d(Module):
     def __init__(self, kernel_size, stride=None, padding=0):
         super().__init__()
         self.kernel_size = kernel_size
-        self.stride = stride
+        self.stride = stride if stride is not None else kernel_size
         self.padding = padding
 
     def __call__(self, x):
@@ -330,6 +362,66 @@ class MaxPool2d(Module):
 
     def forward(self, x):
         return F.maxpool2d(x, self.kernel_size, self.stride, self.padding)
+    
+class AvgPool2d(Module):
+    def __init__(self, kernel_size, stride=None, padding=0):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride if stride is not None else kernel_size
+        self.padding = padding
+
+    def __call__(self, x):
+        return self.forward(x)
+
+    def __repr__(self):
+        args = [f"kernel_size=({self.kernel_size}, {self.kernel_size})"]
+        
+        if self.stride != self.kernel_size:
+            args.append(f"stride=({self.stride}, {self.stride})")
+        if self.padding != 0:
+            args.append(f"padding=({self.padding}, {self.padding})")
+    
+        return "AvgPool2d(" + ", ".join(args) + ")"
+    
+    def _extra_repr(self):
+        return (
+            f"kernel_size=({self.kernel_size}, {self.kernel_size}), "
+            f"stride=({self.stride}, {self.stride}), "
+            f"padding=({self.padding}, {self.padding})"
+        )
+
+    def forward(self, x):
+        return F.averagepool2d(x, self.kernel_size, self.stride, self.padding)
+    
+class AdaptiveAvgPool2d(Module):
+    def __init__(self, output_size):
+        super().__init__()
+        self.output_size = output_size if isinstance(output_size, tuple) else (output_size, output_size)
+
+    def __call__(self, x):
+        return self.forward(x)
+
+    def __repr__(self):
+        return f"AdaptiveAvgPool2d(output_size={self.output_size})"
+
+    def _extra_repr(self):
+        return f"output_size={self.output_size}"
+
+    def forward(self, x):
+        """
+        Compute kernel_size and stride based on input size and desired output size,
+        then call the existing averagepool2d function.
+        """
+        B, C, H, W = x.data.shape
+
+        # Compute kernel_size and stride
+        # Use floor division to ensure integer kernel sizes
+        K = H - (self.output_size[0] - 1)
+        S = 1
+        padding = 0  # No padding needed, as kernel size is adapted
+
+        # Call the existing averagepool2d function
+        return F.averagepool2d(x, kernel_size=K, stride=S, padding=padding)
     
 ############################
 ### NORMALIZATION LAYERS ###
