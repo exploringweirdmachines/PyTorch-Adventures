@@ -1,13 +1,11 @@
-import os
-import cupy as cp
 import numpy as np
 from tqdm import tqdm
 import mytorch
 import mytorch.nn as nn
 import mytorch.optim as optim
 from torchvision.datasets import MNIST
-from mytorch.data import DataLoader
-from myaccelerator.accelerator import Accelerator
+from mytorch.utils.data import DataLoader
+from miniddp.accelerate import Accelerator
 
 import argparse
 
@@ -27,6 +25,8 @@ accelerator = Accelerator()
 
 class MyTorchMNIST(nn.Module):
     def __init__(self):
+        super().__init__()
+        
         self.fc1 = nn.Linear(784, 512)
         self.drop1 = nn.Dropout(0.1)
         self.fc2 = nn.Linear(512, 256)
@@ -44,7 +44,13 @@ class MyTorchMNIST(nn.Module):
         return x
 
 model = MyTorchMNIST()
+accelerator.print(model)
 
+total_params = 0
+for param in model.parameters():
+    if param.requires_grad:
+        total_params += np.prod(param.shape)
+accelerator.print("Total Trainable Parameters:", total_params)
 
 ####################
 ### LOAD DATASET ###
@@ -72,10 +78,7 @@ loss_fn = nn.CrossEntropyLoss()
 model, optimizer, trainloader, testloader = accelerator.prepare(
     model, optimizer, trainloader, testloader
 ) 
-# trainloader = accelerator.prepare_dataloaders(trainloader)
-# testloader = accelerator.prepare_dataloaders(testloader)
-# optimizer = accelerator.prepare_optimizer(optimizer)
-# model = accelerator.prepare_model(model)
+
 #############
 ### TRAIN ###
 #############
