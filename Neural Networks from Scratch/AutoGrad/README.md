@@ -244,7 +244,7 @@ from mytorch.utils.data import DataLoader
 class MyTorchMNIST(nn.Module):
 
     def __init__(self):
-
+        super().__init__()
         self.fc1 = nn.Linear(784, 128)
         self.fc2 = nn.Linear(128, 64)
         self.fc3 = nn.Linear(64, 32)
