@@ -3,6 +3,7 @@ import cupy as cp
 import numpy as np
 from cupyx.distributed import NCCLBackend
 import mytorch
+import wandb
 
 class Accelerator:
     def __init__(self, 
@@ -218,6 +219,29 @@ class Accelerator:
     def print(self, *args, **kwargs):
         if self.is_main_process():
             print(*args, **kwargs)
+
+    def init_tracker(self,
+                     project_name, 
+                     run_name, 
+                     config=None):
+
+        if config is not None:
+            assert isinstance(config, dict), "Config must be a dictionary!"
+            
+        if self.rank == 0:
+            wandb.init(
+                project=project_name,
+                name=run_name,
+                config=config
+            )
+
+    def log(self, log_dict, step):
+
+        assert isinstance(log_dict, dict), "log_dict must be dictionary!"
+        assert isinstance(step, int), "step must be integer!"
+
+        if self.rank == 0:
+            wandb.log(log_dict, step=step)
 
     def __del__(self):
         if self.comm is not None:
