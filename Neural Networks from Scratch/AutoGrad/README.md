@@ -52,7 +52,7 @@ Build a relatively robust Deep Learning Framework, using [CuPy](https://docs.cup
 |-------------|------|---------------|-----------------|
 | Linear      | ✅   | ✅            | ✅              |
 | Embedding   | ✅   | ✅            | ❌              |
-| Dropout     | ✅   | ✅            | ❌              |
+| Dropout     | ✅   | ✅            | ✅              |
 
 ### 🔸 Convolutions & Pooling
 | Operation         | Impl | Auto Backward | Manual Backward |
@@ -130,7 +130,7 @@ If you take the chain rule derivative of $\frac{d \sigma(x)}{d x}$ you will end 
 
 The most important part of the AutoGrad system is building the computational graph to know the order of backpropagation. In [MicroGrad](https://github.com/karpathy/micrograd), Karpathy used something called [Topological Sort](https://www.geeksforgeeks.org/topological-sorting/) but I liked the method used by [Autograd-from-Scratch](https://github.com/eduardoleao052/Autograd-from-scratch/tree/main) where its almost like a Depth-First Gradient accumulation on the graph. We will implement both as it only requires a few changes!
 
-You will find the Topological Sort in the files ```tensor.py```, ```functional.py``` and ```modules.py```. Additionally you will find the same methods with small changes to make it recursive in ```recursive_tensor.py```, ```recursive_functional.py```, ```recursive_modules.py```. 
+You will find the Topological Sort in the files ```tensor.py```, ```functional.py``` and ```modules.py```. Additionally you will find the same methods with small changes to make it recursive in ```recursive_tensor.py```, ```recursive_functional.py```, ```recursive_modules.py```. Additional optimizations (i.e. limiting array creations, fused kernels, etc...) have been added to the non-recursive methods and that will remain the method I continue to iterate on!
 
 #### Example 1: Gradient Propagation 
 ![graph1](../../src/visuals/computational_graph_1.png)
