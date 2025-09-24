@@ -1,8 +1,6 @@
 import cupy as cp
 import mytorch.nn as nn
 
-
-
 class Embeddings(nn.Module):
 
     def __init__(self, vocab_size, embed_dim, context_length):
@@ -60,14 +58,11 @@ class Attention(nn.Module):
         ### Store Shape ###
         batch, seq_len, embed_dim = x.shape
 
-        ### Flatten Batch and Seq Len Dimension ###
-        x = x.reshape(batch*seq_len, embed_dim)
-   
-        ### Compute Attention with Flash Attention ###
-        q = self.q_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
-        k = self.k_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
-        v = self.v_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
-       
+        ### Compute Projections and make Contiguous ###
+        q = self.q_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2).contiguous()
+        k = self.k_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2).contiguous()
+        v = self.v_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2).contiguous()
+        
         ### Compute Attention (Attention Mask has shape Batch x Sequence len x Sequence len) ###
         scores = (q @ k.transpose(-2, -1)) / self.head_dim**0.5
     
@@ -79,14 +74,12 @@ class Attention(nn.Module):
         attention = self.attn_drop(attention)
 
         output = attention @ v
-        output = output.transpose(1,2).reshape(batch*seq_len, embed_dim)
+        output = output.transpose(1,2).reshape(batch,seq_len,embed_dim)
         
         ### Compute Output Projection (on flattened dimension) ###
         output = self.out_proj(output)
         output = self.proj_drop(output)
 
-        output = output.reshape(batch, seq_len, embed_dim)
-        
         return output
     
 class FeedForward(nn.Module):
@@ -97,7 +90,7 @@ class FeedForward(nn.Module):
         super().__init__()
         hidden_size = embed_dim * mlp_ratio
         self.intermediate_dense = nn.Linear(embed_dim, hidden_size)
-        self.activation = nn.ReLU()
+        self.activation = nn.GELU()
         self.intermediate_dropout = nn.Dropout(mlp_dropout_p)
 
         self.output_dense = nn.Linear(hidden_size, embed_dim)
@@ -105,19 +98,12 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
 
-        ### Reshape X to be (B*S x E)
-        batch_size, seq_len, embed_dim = x.shape
-        x = x.reshape(batch_size*seq_len, embed_dim)
-
         x = self.intermediate_dense(x)
         x = self.activation(x)
         x = self.intermediate_dropout(x)
 
         x = self.output_dense(x)
         x = self.output_dropout(x)
-
-        ### Return original shape ####
-        x = x.reshape(batch_size, seq_len, embed_dim)
 
         return x
     
@@ -163,19 +149,15 @@ class GPT2(nn.Module):
         ])
 
         self.lm_head = nn.Linear(embed_dim, vocab_size)
+        self.lm_head.W.data = self.embeddings.char_embeddings.weight.data.T
 
     def forward(self, x, attention_mask=None):
-
-        batch_size, seq_len = x.shape
 
         x = self.embeddings(x)
 
         for block in self.blocks:
             x = block(x, attention_mask)
-       
-        ### Flatten for Linear Layer ###        
-        x = x.reshape(batch_size*seq_len, self.embed_dim)
+        
         x = self.lm_head(x)
-        x = x.reshape(batch_size, seq_len, self.vocab_size)
 
         return x

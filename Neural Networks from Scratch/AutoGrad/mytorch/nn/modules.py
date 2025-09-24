@@ -35,19 +35,33 @@ class Module:
         # Always assign normally
         return object.__setattr__(self, name, value)
 
-    def parameters(self):
-        for param in self._parameters.values():
-            yield param
-        for module in self._modules.values():
-            yield from module.parameters()
+    def parameters(self, memo=None):
+        if memo is None:
+            memo = set()
 
-    def named_parameters(self, prefix=""):
-        for name, p in self._parameters.items():
-            full = f"{prefix}{name}" if prefix else name
-            yield full, p
+        for param in self._parameters.values():
+            ptr = param.data.data.ptr
+            if param is not None and ptr not in memo:
+                memo.add(ptr)
+                yield param
+
+        for module in self._modules.values():
+            yield from module.parameters(memo)
+
+    def named_parameters(self, prefix="", memo=None):
+        if memo is None:
+            memo = set()
+
+        for name, param in self._parameters.items():
+            ptr = param.data.data.ptr
+            if param is not None and ptr not in memo:
+                memo.add(ptr)
+                full = f"{prefix}{name}" if prefix else name
+                yield full, param
+
         for name, m in self._modules.items():
             sub_prefix = f"{prefix}{name}." if prefix else f"{name}."
-            yield from m.named_parameters(sub_prefix)
+            yield from m.named_parameters(sub_prefix, memo)
 
     def register_buffer(self, name, tensor):
         if not isinstance(tensor, Tensor):
@@ -252,9 +266,7 @@ class Dropout(Module):
     def __init__(self, dropout_p=0.5):
         super().__init__()
         self.p = dropout_p
-        self.keep_p = 1.0 - dropout_p
         self.training = True
-        self.mask = None
 
     def __call__(self, x):
         return self.forward(x)
@@ -266,19 +278,7 @@ class Dropout(Module):
         return f"p={self.p}"
     
     def forward(self, x):
-        
-        if not self.training or self.p == 0.0:
-            return x
-
-        ### This is slow as it creates a tensor the same shape as your activations ###
-        mask = cp.random.random_sample(x.shape, dtype=cp.float32)
-        mask = mask >= self.p
-
-        ### Reweight Non-Masked Positions ###
-        mask = mask / (1.0 - self.p)
-        out = x * mask
-    
-        return out
+        return F.dropout(x, self.p, self.training)
 
 class Conv2d(Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True):
