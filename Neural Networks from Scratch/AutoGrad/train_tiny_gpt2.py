@@ -134,7 +134,8 @@ def main(args):
                 num_blocks=NUM_BLOCKS, 
                 dropout_p=DROPOUT_P, 
                 mlp_ratio=MLP_RATIO)
-    
+
+
     total_params = 0
     for param in model.parameters():
         if param.requires_grad:
@@ -161,13 +162,12 @@ def main(args):
 
     ### Train Model ###
     def train_step():
-
+            
         for i in range(GRADIENT_ACCUMULATION_STEPS):
 
             inputs, targets = get_batch(tokens, BATCH_SIZE//GRADIENT_ACCUMULATION_STEPS, CONTEXT_LENGTH)
         
             ### Compute Logits ###
-
             logits = model(inputs, causal_mask)
     
             ### Compute Loss ###
@@ -186,7 +186,7 @@ def main(args):
         ### Update Scheduler ###
         scheduler.step()
 
-        return logits, targets, loss
+        return logits.detach(), targets.detach(), loss.detach()
 
     def generate_sample(starting_text=SAMPLE_GEN_SEED, 
                         gen_len=GEN_LENGTH):
@@ -231,7 +231,7 @@ def main(args):
     for iter in tqdm(range(TRAINING_ITERATIONS)):
 
         logits, targets, loss = train_step()
-
+        
         if iter % LOG_ITER == 0:
             preds = logits.argmax(dim=-1).reshape(-1)
             targets = targets.reshape(-1)
