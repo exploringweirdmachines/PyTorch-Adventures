@@ -2,6 +2,7 @@ import os
 import cupy as cp
 import weakref
 from contextlib import contextmanager
+import gc
 
 ##### QUICK ENABLE FOR TENSOR CORE OPS ###
 device = cp.cuda.Device()
@@ -53,7 +54,7 @@ class Tensor:
 
         ### Container to Store Children (output) of Every Operation ###
         ### (i.e. if we add tensor A and B to create C, C is the child of A and child of B) ###
-        self._parents = []
+        self._parents = ()
 
         self.is_leaf = self.requires_grad and (grad_fn is None)
         
@@ -138,17 +139,23 @@ class Tensor:
 
         assert len(x_shape) == len(grad_shape), "Gradient and tensor shapes must be the same length! Only different by broadcasting"
 
-        for idx, (x_dim, grad_dim) in enumerate(zip(x_shape, grad_shape)):
-            ### If our tensor dim is 1 but the grad dim is not, accumulate on that dimension ###
-            if (x_dim == 1) and (grad_dim != 1):
-                x_grad = x_grad.sum(axis=idx, keepdims=True)
-            ### Otherwise verify that our x_dim and grad dim are the same!! 
-            else:
-                assert (x_dim == grad_dim)
+        # for idx, (x_dim, grad_dim) in enumerate(zip(x_shape, grad_shape)):
+        #     ### If our tensor dim is 1 but the grad dim is not, accumulate on that dimension ###
+        #     if (x_dim == 1) and (grad_dim != 1):
+        #         x_grad = x_grad.sum(axis=idx, keepdims=True)
+        #     ### Otherwise verify that our x_dim and grad dim are the same!! 
+        #     else:
+        #         assert (x_dim == grad_dim)
+
+        ### Now instead of checking every dim and adding, just add all at once to vectorize! ###
+        sum_axes = [idx for idx, (x_dim, grad_dim) in enumerate(zip(x_shape, grad_shape)) if x_dim == 1 and grad_dim != 1]
+        if sum_axes:
+            x_grad = cp.sum(x_grad, axis=tuple(sum_axes), keepdims=True)
 
         return x_grad
     
     def backward(tensor, grad=None):
+       
         # Initialize output gradient
         if grad is None:
             grad = cp.ones_like(tensor.data, dtype=cp.float32)
@@ -162,7 +169,10 @@ class Tensor:
             if id(t) in visited:
                 return
             visited.add(id(t))
-            for parent_ref in getattr(t, "_parents", []):
+            parents = getattr(t, "_parents", ())
+            if parents is None:
+                parents = ()
+            for parent_ref in parents:
                 parent = parent_ref()
                 if parent is not None:
                     build_topo(parent)
@@ -202,15 +212,18 @@ class Tensor:
         def _add_backward(input_grad):
             if self.requires_grad:
                 self_grad = self._broadcasted_grad_accumulate(self.shape, input_grad)
+
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += self_grad
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
 
             if val.requires_grad:
                 val_grad = self._broadcasted_grad_accumulate(val.shape, input_grad)
                 if val.grad is None:
-                    val.grad = cp.zeros_like(val.data, dtype=cp.float32)
-                val.grad += val_grad
+                    val.grad = val_grad
+                else:
+                    val.grad += val_grad
 
         requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
         output = Tensor(output,
@@ -267,16 +280,18 @@ class Tensor:
                 self_grad = self._broadcasted_grad_accumulate(self.shape, self_grad)
                 
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += self_grad
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
                 
             if val.requires_grad:
                 val_grad = -input_grad
                 val_grad = self._broadcasted_grad_accumulate(val.shape, val_grad)
                 
                 if val.grad is None:
-                    val.grad = cp.zeros_like(val.data, dtype=cp.float32)
-                val.grad += val_grad
+                    val.grad = val_grad
+                else:
+                    val.grad += val_grad
 
         ### Wrap our output in our tensor object ###
         ### We will compute grad on this if self or val are also tracking gradients ###
@@ -334,16 +349,18 @@ class Tensor:
                 self_grad = self._broadcasted_grad_accumulate(self.shape, self_grad)
                 
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += self_grad
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
             
             if val.requires_grad:
                 val_grad = input_grad * self.data
                 val_grad = self._broadcasted_grad_accumulate(val.shape, val_grad)
                 
                 if val.grad is None:
-                    val.grad = cp.zeros_like(val.data, dtype=cp.float32)
-                val.grad += val_grad
+                    val.grad = val_grad
+                else:
+                    val.grad += val_grad
 
 
         requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
@@ -382,16 +399,18 @@ class Tensor:
                 grad_self = cp.matmul(input_grad, val.data.swapaxes(-1, -2), out=prealloc_grad_self)
                 
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += grad_self
+                    self.grad = grad_self
+                else:
+                    self.grad += grad_self
 
             if val.requires_grad:
                 prealloc_grad_val = cp.empty(shape=val.shape, dtype=self.data.dtype)
                 grad_val = cp.matmul(self.data.swapaxes(-1, -2), input_grad, out=prealloc_grad_val)
                 
                 if val.grad is None:
-                    val.grad = cp.zeros_like(val.data, dtype=cp.float32)
-                val.grad += grad_val
+                    val.grad = grad_val
+                else:
+                    val.grad += grad_val
 
 
         requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
@@ -433,16 +452,18 @@ class Tensor:
                 self_grad = self._broadcasted_grad_accumulate(self.shape, self_grad)
                 
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += self_grad
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
 
             if val.requires_grad:
                 val_grad = input_grad * -1 * self.data / (val.data**2)
                 val_grad = self._broadcasted_grad_accumulate(val.shape, val_grad)
                 
                 if val.grad is None:
-                    val.grad = cp.zeros_like(val.data, dtype=cp.float32)
-                val.grad += val_grad
+                    val.grad = val_grad
+                else:
+                    val.grad += val_grad
         
         ### Convert to Tensor ###
         requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
@@ -486,8 +507,9 @@ class Tensor:
             self_grad = input_grad * (exponent * self.data ** (exponent-1))
             
             if self.grad is None:
-                self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-            self.grad += self_grad
+                self.grad = self_grad
+            else:
+                self.grad += self_grad
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(output,
@@ -568,8 +590,9 @@ class Tensor:
                 self_grad = input_grad.swapaxes(dim1, dim2)
 
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += self_grad
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(out_data,
@@ -595,8 +618,9 @@ class Tensor:
                 inv_dims = cp.argsort(dims)
                 self_grad = cp.transpose(input_grad, axes=inv_dims)
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += self_grad
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(out_data,
@@ -621,8 +645,9 @@ class Tensor:
             if self.requires_grad:
                 self_grad = input_grad * out_data  # use forward output to save recomputation
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += self_grad
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -653,8 +678,9 @@ class Tensor:
                 self_grad = input_grad * (1/self.data)
 
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += self_grad
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
         
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(output, 
@@ -680,8 +706,9 @@ class Tensor:
                 # Broadcast input gradient to input shape
                 self_grad = cp.broadcast_to(input_grad, self.shape)
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += self_grad
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -714,8 +741,9 @@ class Tensor:
                 # Broadcast upstream gradient and scale
                 self_grad = cp.broadcast_to(input_grad, self.shape) / num_vals_averaged
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += self_grad
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -755,8 +783,9 @@ class Tensor:
                 self_grad = 2.0 * centered * input_grad_broadcast / num_vals_reduced
 
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += self_grad
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -797,8 +826,9 @@ class Tensor:
     
                 # Call backward on self
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += grad
+                    self.grad = grad
+                else:
+                    self.grad += grad
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -847,8 +877,9 @@ class Tensor:
             if self.requires_grad:
                 self_grad = input_grad.reshape(self.data.shape)
                 if self.grad is None:
-                    self.grad = cp.zeros_like(self.data, dtype=cp.float32)
-                self.grad += self_grad
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -881,9 +912,8 @@ class Tensor:
         """
 
         if not isinstance(parents, (list, tuple)):
-            parents = [parents]
-
-        self._parents.extend([weakref.ref(p) for p in parents if p is not None])
+            parents = (parents)
+        self._parents = (weakref.ref(p) for p in parents if p is not None)
 
     def item(self):
         if self.data.size != 1:
@@ -893,3 +923,18 @@ class Tensor:
     def astype(self, dtype):
         self.data = self.data.astype(dtype)
         return self
+    
+    def contiguous(self):
+        self.data = cp.ascontiguousarray(self.data, dtype=cp.float32)
+        return self
+    
+    def detach(self):
+
+        detached = Tensor(
+            self.data,  
+            requires_grad=False,
+            grad_fn=None,
+            grad_fn_name=None
+        )
+
+        return detached

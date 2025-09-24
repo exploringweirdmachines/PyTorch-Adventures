@@ -58,9 +58,14 @@ def linear(input, weight, bias=None, auto=False):
             input_cp = input_cp.reshape(-1, in_features)
 
         ### Do MatMul Op ###
-        output = cp.matmul(input_cp, weight.data)
+        output_shape = (np.prod(dims), out_features) if reshaped else (input_cp.shape[0], out_features)
+        output = cp.empty(output_shape, dtype=cp.float32)
+        cp.matmul(input_cp, weight.data, out=output)
+
         if bias is not None:
-            output += bias.data.reshape(1,-1)
+            cp.add(output, bias.data.reshape(1,-1), out=output)
+
+        # output = fused_linear_blas(input_cp, weight.data, bias.data)
 
         ### Return output to original shape (*, O) ###
         if reshaped:
@@ -79,15 +84,19 @@ def linear(input, weight, bias=None, auto=False):
             if weight.requires_grad:
                 grad_W = cp.matmul(input_cp.T, grad_output)
                 if weight.grad is None:
-                    weight.grad = cp.zeros_like(weight.data, dtype=cp.float32)
-                weight.grad += grad_W
+                    # weight.grad = cp.zeros_like(weight.data, dtype=cp.float32)
+                    weight.grad = grad_W
+                else:
+                    weight.grad += grad_W
             
             ### Standard Bias Update Formula ###
             if bias is not None and bias.requires_grad:
                 grad_b = grad_output.sum(axis=0)
                 if bias.grad is None:
-                    bias.grad = cp.zeros_like(bias.data, dtype=cp.float32)
-                bias.grad += grad_b
+                    # bias.grad = cp.zeros_like(bias.data, dtype=cp.float32)
+                    bias.grad = grad_b
+                else:
+                    bias.grad += grad_b
             
             ### Grad to Input ###
             if input.requires_grad:
@@ -97,8 +106,10 @@ def linear(input, weight, bias=None, auto=False):
                 grad_input = grad_input.reshape(*dims, in_features)
                 
                 if input.grad is None:
-                    input.grad = cp.zeros_like(input.data, dtype=cp.float32)
-                input.grad += grad_input
+                    # input.grad = cp.zeros_like(input.data, dtype=cp.float32)
+                    input.grad = grad_input
+                else:   
+                    input.grad += grad_input
         
         requires_grad = input.requires_grad or weight.requires_grad or \
                             (bias is not None and bias.requires_grad)
@@ -914,18 +925,54 @@ def embedding(indices, weight):
     """
     return weight[indices]
 
-def dropout(input, dropout_p, training=True):
-    if not training:
-        return input
+def dropout(input_tensor, dropout_p, training=True, auto=False):
+
+    if not training or dropout_p == 0.0:
+        return input_tensor
+
+    if auto:
+
+        ### Sample Uniformly for every value in input ###
+        mask = cp.random.random_sample(input.shape, dtype=cp.float32)
+        mask = (mask >= dropout_p)
+
+        #### Reweight Non-Masked Positions to maintain overal data variance ###
+        mask = mask / (1.0 - dropout_p)
+        return input * mask
+
+    else:
+
+        # Generate binary mask scaled to preserve expected value
+        mask = (cp.random.random_sample(input_tensor.data.shape, dtype=cp.float32) >= dropout_p)
+        mask = mask.astype(cp.float32) / (1.0 - dropout_p)
+
+        # Ensure contiguous layout and preserve shape
+        # out_data = cp.ascontiguousarray(input_tensor.data * mask)
+        out_data = input_tensor.data * mask
+        
+        # Backward function only needs the mask (not full input_tensor)
+        def _dropout_backward(input_grad):
+            if input_tensor.requires_grad:
+                self_grad = input_grad * mask
+                if input_tensor.grad is None:
+                    input_tensor.grad = self_grad
+                else:
+                    input_tensor.grad += self_grad
+
+        # Attach to computation graph if needed
+        requires_grad = input_tensor.requires_grad and input_tensor.__class__.build_graph_enabled()
+        out = input_tensor.__class__(
+            out_data,
+            requires_grad=requires_grad,
+            grad_fn=_dropout_backward if requires_grad else None,
+            grad_fn_name="<DropoutBackward>" if requires_grad else None,
+        )
+
+        if requires_grad:
+            out._add_parents(input_tensor)
+
+        return out
     
-    ### Sample Uniformly for every value in input ###
-    mask = cp.random.random_sample(input.shape, dtype=cp.float32)
-    mask = (mask >= dropout_p)
-
-    #### Reweight Non-Masked Positions to maintain overal data variance ###
-    mask = mask / (1.0 - dropout_p)
-    return input * mask
-
 def layernorm(input, gamma, beta, eps=1e-5, auto=False):
 
     """
@@ -990,16 +1037,17 @@ def layernorm(input, gamma, beta, eps=1e-5, auto=False):
                 grad_gamma = cp.sum(grad_output * norm_x, axis=0)
 
                 if gamma.grad is None:
-                    gamma.grad = cp.zeros_like(gamma.data, dtype=cp.float32)
-                gamma.grad += grad_gamma
-            
+                    gamma.grad = grad_gamma
+                else:
+                    gamma.grad += grad_gamma
             
             if beta.requires_grad:
                 grad_beta = cp.sum(grad_output, axis=0)
                 
                 if beta.grad is None:
-                    beta.grad = cp.zeros_like(beta.data, dtype=cp.float32)
-                beta.grad += grad_beta
+                    beta.grad = grad_beta
+                else:
+                    beta.grad += grad_beta
 
             if input.requires_grad:
                 grad_norm = grad_output * gamma_cp
@@ -1012,8 +1060,9 @@ def layernorm(input, gamma, beta, eps=1e-5, auto=False):
                     grad_input = grad_input.reshape(*dims, embed_dim)
 
                 if input.grad is None:
-                    input.grad = cp.zeros_like(input.data, dtype=cp.float32)
-                input.grad += grad_input
+                    input.grad = grad_input
+                else:
+                    input.grad += grad_input
 
         requires_grad = input.requires_grad or gamma.requires_grad or beta.requires_grad
         requires_grad = requires_grad and Tensor.build_graph_enabled()
@@ -1027,7 +1076,7 @@ def layernorm(input, gamma, beta, eps=1e-5, auto=False):
         if requires_grad:
             output._add_parents(input, gamma, beta)
 
-        return output         
+        return output
 
 def batchnorm(input, gamma, beta, 
               running_mean, running_var, momentum=0.1, 
@@ -1158,8 +1207,9 @@ def relu(x, auto=False):
             if x.requires_grad:
                 grad_input = input_grad * (x.data > 0)
                 if x.grad is None:
-                    x.grad = cp.zeros_like(x.data, dtype=cp.float32)
-                x.grad += grad_input
+                    x.grad = grad_input
+                else:
+                    x.grad += grad_input
 
         requires_grad = x.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -1202,8 +1252,9 @@ def gelu(x):
             grad_input = 0.5 * (1.0 + tanh_out + x.data * sech2 * inner_grad) * grad_output
 
             if x.grad is None:
-                x.grad = cp.zeros_like(x.data, dtype=cp.float32)
-            x.grad += grad_input
+                x.grad = grad_input
+            else:
+                x.grad += grad_input
 
     requires_grad = x.requires_grad and Tensor.build_graph_enabled()
     out = Tensor(
@@ -1248,8 +1299,9 @@ def softmax(x, dim=-1, auto=False):
                 grad_input = s * (grad_output - sum_grad_s)
                 
                 if x.grad is None:
-                    x.grad = cp.zeros_like(x.data, dtype=cp.float32)
-                x.grad += grad_input
+                    x.grad = grad_input
+                else:
+                    x.grad += grad_input
 
         out = Tensor(
             out_data,
@@ -1329,8 +1381,9 @@ def cross_entropy(logits, targets, auto=False):
                 grad_input = grad_input.reshape(logits.shape)
 
                 if logits.grad is None:
-                    logits.grad = cp.zeros_like(logits.data, dtype=cp.float32)
-                logits.grad += grad_input
+                    logits.grad = grad_input
+                else:
+                    logits.grad += grad_input
                     
 
         requires_grad = logits.requires_grad
