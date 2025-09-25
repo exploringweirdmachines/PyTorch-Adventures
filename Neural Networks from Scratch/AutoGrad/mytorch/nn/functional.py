@@ -93,7 +93,6 @@ def linear(input, weight, bias=None, auto=False):
             if bias is not None and bias.requires_grad:
                 grad_b = grad_output.sum(axis=0)
                 if bias.grad is None:
-                    # bias.grad = cp.zeros_like(bias.data, dtype=cp.float32)
                     bias.grad = grad_b
                 else:
                     bias.grad += grad_b
@@ -973,7 +972,7 @@ def dropout(input_tensor, dropout_p, training=True, auto=False):
 
         return out
     
-def layernorm(input, gamma, beta, eps=1e-5, auto=False):
+def layernorm(input, weight, bias, eps=1e-5, auto=False):
 
     """
     Standard LayerNorm op with input of the shape (*, E)
@@ -997,7 +996,10 @@ def layernorm(input, gamma, beta, eps=1e-5, auto=False):
         
         var_x = (input.var(dim=-1, keepdims=True) + eps).astype(cp.float32)
         norm_x = (input - input.mean(dim=-1, keepdims=True)) / var_x**0.5
-        scale_shifted_x = norm_x * gamma.reshape(1,-1) + beta.reshape(1,-1)
+        scale_shifted_x = norm_x * weight.reshape(1,-1) 
+        
+        if bias:
+            scale_shifted_x = scale_shifted_x + bias.reshape(1,-1)
 
         if reshaped:
             scale_shifted_x = scale_shifted_x.reshape(*dims, embed_dim)
@@ -1007,8 +1009,10 @@ def layernorm(input, gamma, beta, eps=1e-5, auto=False):
     else:
 
         input_cp = input.data
-        gamma_cp = gamma.data
-        beta_cp = beta.data
+        gamma_cp = weight.data
+
+        if bias is not None:
+            beta_cp = bias.data
 
         if reshaped:
             input_cp = input_cp.reshape(-1, embed_dim)
@@ -1022,7 +1026,9 @@ def layernorm(input, gamma, beta, eps=1e-5, auto=False):
         norm_x = (input_cp - mean) * inv_std
 
         ### Scale and Shift ###
-        output = norm_x * gamma_cp.reshape(1,-1) + beta_cp.reshape(1,-1)
+        output = norm_x * gamma_cp.reshape(1,-1)
+        if bias is not None:
+            output += beta_cp.reshape(1,-1)
 
         ### Reshape Back if Needed ###
         output = output.reshape(*dims, embed_dim)
@@ -1033,21 +1039,22 @@ def layernorm(input, gamma, beta, eps=1e-5, auto=False):
             if reshaped:
                 grad_output = grad_output.reshape(-1, embed_dim)
 
-            if gamma.requires_grad:
+            if weight.requires_grad:
                 grad_gamma = cp.sum(grad_output * norm_x, axis=0)
 
-                if gamma.grad is None:
-                    gamma.grad = grad_gamma
+                if weight.grad is None:
+                    weight.grad = grad_gamma
                 else:
-                    gamma.grad += grad_gamma
+                    weight.grad += grad_gamma
             
-            if beta.requires_grad:
-                grad_beta = cp.sum(grad_output, axis=0)
-                
-                if beta.grad is None:
-                    beta.grad = grad_beta
-                else:
-                    beta.grad += grad_beta
+            if bias is not None:
+                if bias.requires_grad:
+                    grad_beta = cp.sum(grad_output, axis=0)
+                    
+                    if bias.grad is None:
+                        bias.grad = grad_beta
+                    else:
+                        bias.grad += grad_beta
 
             if input.requires_grad:
                 grad_norm = grad_output * gamma_cp
@@ -1064,7 +1071,8 @@ def layernorm(input, gamma, beta, eps=1e-5, auto=False):
                 else:
                     input.grad += grad_input
 
-        requires_grad = input.requires_grad or gamma.requires_grad or beta.requires_grad
+        requires_grad = input.requires_grad or weight.requires_grad or \
+                            (bias is not None and bias.requires_grad)
         requires_grad = requires_grad and Tensor.build_graph_enabled()
         output = Tensor(
             output, 
@@ -1074,7 +1082,7 @@ def layernorm(input, gamma, beta, eps=1e-5, auto=False):
         )
 
         if requires_grad:
-            output._add_parents(input, gamma, beta)
+            output._add_parents(input, weight, bias)
 
         return output
 

@@ -28,6 +28,7 @@ class Module:
         # Register parameters
         if isinstance(value, Tensor):
             self._parameters[name] = value
+
         # Register submodules (including ModuleList)
         elif isinstance(value, Module):
             self._modules[name] = value
@@ -68,6 +69,16 @@ class Module:
             raise TypeError("Buffers must be Tensors")
         self._buffers[name] = tensor
         object.__setattr__(self, name, tensor)
+
+    def apply(self, fn):
+        
+        """
+        Function to apply to all modules (mainly for weight init)
+        """
+        fn(self)
+        for m in self._modules.values():
+            m.apply(fn)
+        return self
 
     def _extra_repr(self):
         return ""
@@ -213,20 +224,19 @@ class Linear(Module):
         self.bias = bias
         self.auto = auto
 
-        # Weight initialization
         k = math.sqrt(1 / in_features)
-        self.W = Tensor(
+        self.weight = Tensor(
             cp.random.uniform(-k, k, size=(in_features, out_features), dtype=cp.float32),
             requires_grad=True
         )
 
         if self.bias:
-            self.b = Tensor(
+            self.bias = Tensor(
                 cp.random.uniform(-k, k, size=(out_features,), dtype=cp.float32),
                 requires_grad=True
             )
         else:
-            self.b = None
+            self.bias = None
 
     def __call__(self, x):
         return self.forward(x)
@@ -238,7 +248,7 @@ class Linear(Module):
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias}"
     
     def forward(self, x: Tensor):
-        output = F.linear(x, weight=self.W, bias=self.b, auto=self.auto)
+        output = F.linear(x, weight=self.weight, bias=self.bias, auto=self.auto)
         return output
     
 class Embedding(Module):
@@ -278,7 +288,8 @@ class Dropout(Module):
         return f"p={self.p}"
     
     def forward(self, x):
-        return F.dropout(x, self.p, self.training)
+        enable_dropout = self.training and (self.p > 0)
+        return F.dropout(x, self.p, enable_dropout)
 
 class Conv2d(Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True):
@@ -427,12 +438,16 @@ class AdaptiveAvgPool2d(Module):
 ### NORMALIZATION LAYERS ###
 ############################
 class LayerNorm(Module):
-    def __init__(self, embed_dim, auto=False):
+    def __init__(self, embed_dim, bias=True, auto=False):
         super().__init__()
         self.embed_dim = embed_dim
         self.auto = auto
-        self.gamma = Tensor(cp.ones(shape=(embed_dim), dtype=cp.float32), requires_grad=True)
-        self.beta = Tensor(cp.zeros(shape=(embed_dim), dtype=cp.float32), requires_grad=True)
+        self.weight = Tensor(cp.ones(shape=(embed_dim), dtype=cp.float32), requires_grad=True)
+
+        if bias:
+            self.bias = Tensor(cp.zeros(shape=(embed_dim), dtype=cp.float32), requires_grad=True)
+        else:
+            self.bias = None
 
     def __call__(self, x):
         return self.forward(x)
@@ -444,7 +459,7 @@ class LayerNorm(Module):
         return f"{self.embed_dim}"
     
     def forward(self, x):
-        return F.layernorm(x, self.gamma, self.beta, auto=self.auto)
+        return F.layernorm(x, self.weight, self.bias, auto=self.auto)
     
 class BatchNorm2d(Module):
     def __init__(self, num_features, eps=1e-5, momentum=0.1):
