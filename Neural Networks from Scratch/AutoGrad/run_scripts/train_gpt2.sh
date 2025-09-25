@@ -1,0 +1,21 @@
+DATA_PATH="/mnt/datadrive/data/owt_bin"
+python -m mytorch.distributed.launch --num_gpus 2 --training_script train_gpt2.py \
+    --context_length 256 \
+    --embed_dim 512 \
+    --num_heads 8 \
+    --num_blocks 8 \
+    --dropout_p 0.0 \
+    --mlp_ratio 4 \
+    --data_path $DATA_PATH \
+    --train_iterations 10000 \
+    --warmup_steps 1500 \
+    --batch_size 128 \
+    --max_lr "3e-4" \
+    --min_lr "3e-5" \
+    --weight_decay 0.1 \
+    --max_grad_norm 1.0 \
+    --gradient_accumulation 4 \
+    --log_iter 25 \
+    --gen_iter 500 \
+    --gen_length 256 \
+    --save_path "work_dir/owt_gpt2.safetensors"
