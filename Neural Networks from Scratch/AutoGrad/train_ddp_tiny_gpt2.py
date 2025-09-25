@@ -196,6 +196,7 @@ loss_fn = nn.CrossEntropyLoss()
 ### Train Model ###
 
 pbar = tqdm(range(args.train_iterations), disable=not accelerator.is_main_process())
+completed_steps = 0
 for iter in range(args.train_iterations * args.gradient_accumulation_steps):
 
     # Sample a batch
@@ -215,31 +216,36 @@ for iter in range(args.train_iterations * args.gradient_accumulation_steps):
     optimizer.step()
     optimizer.zero_grad()
 
-    ### Update Scheduler ###
-    scheduler.step()
-
-    # Gather metrics across GPUs
-    if iter % args.log_iter == 0:
-        loss_val = accelerator.gather_for_metrics(loss)
-        accuracy_val = accelerator.gather_for_metrics(
-            (logits.argmax(dim=-1).reshape(-1) == targets).sum() / len(targets)
-        )
-        accelerator.print(f"Iter {iter}, Loss: {loss_val:.4f}, Accuracy: {accuracy_val*100:.2f}%, LR: {scheduler.get_last_lr():.2e}")
-
-        if args.log_wandb:
-            accelerator.log({"loss": loss_val, "accuracy": accuracy_val, "lr": scheduler.get_last_lr()}, step=iter)
-    # Generate sample text every GEN_ITER
-    if iter % args.gen_iter == 0 and accelerator.is_main_process():
-        model.eval()
-        generate_sample(model=model,
-                        tokenizer=tokenizer,
-                        starting_text=args.sample_seed,
-                        gen_len=args.gen_length,
-                        context_length=args.context_length)
-        model.train()
-    
     if iter % args.gradient_accumulation_steps == 0:
+        
+        ### Update Scheduler ###
+        scheduler.step()
+        
+        ### Update Progress Bar ###
         pbar.update(1)
+        completed_steps += 1
+    
+        if completed_steps % args.log_iter == 0:
+            loss_val = accelerator.gather_for_metrics(loss)
+            accuracy_val = accelerator.gather_for_metrics(
+                (logits.argmax(dim=-1).reshape(-1) == targets).sum() / len(targets)
+            )
+            accelerator.print(f"Iter {completed_steps}, Loss: {loss_val:.4f}, Accuracy: {accuracy_val*100:.2f}%, LR: {scheduler.get_last_lr():.2e}")
+
+            if args.log_wandb:
+                accelerator.log({"loss": loss_val, "accuracy": accuracy_val, "lr": scheduler.get_last_lr()}, step=completed_steps)
+
+        # Generate sample text every GEN_ITER
+        if completed_steps % args.gen_iter == 0 and accelerator.is_main_process():
+            model.eval()
+            generate_sample(model=model,
+                            tokenizer=tokenizer,
+                            starting_text=args.sample_seed,
+                            gen_len=args.gen_length,
+                            context_length=args.context_length)
+            model.train()
+    
+    
         
 ### Save Model ###
 print(f"Saving Weights to {args.save_path}")
