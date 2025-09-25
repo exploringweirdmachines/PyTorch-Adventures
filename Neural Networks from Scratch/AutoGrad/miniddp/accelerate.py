@@ -38,6 +38,9 @@ class Accelerator:
                 port=int(self.master_port)
             )
 
+        ### Random Seed per Rank ###
+        cp.random.seed(seed=42 + self.rank)
+
     def is_main_process(self):
         return self.rank == 0
     
@@ -57,7 +60,15 @@ class Accelerator:
     
     def prepare_model(self, model):
 
+        ### Store Access to Model ###
         self.model = model
+
+        ### Broadcast Weights from Model into Other GPUs ###
+        if self.comm is not None:
+            print("WE ARE SYNCING!")
+            for param in self.model.parameters():
+                self.comm.broadcast(param.data, root=0)
+        
         return self.model
     
     def prepare_optimizer(self, optimizer):
@@ -174,7 +185,7 @@ class Accelerator:
             if self.comm is not None:
                 for param in self.model.parameters():
                     if hasattr(param, "grad") and param.grad is not None:
-                        out = cp.zeros_like(param.grad)
+                        out = cp.empty_like(param.grad)
                         self.comm.all_reduce(param.grad, out, op="sum")
                         param.grad[:] = out / self.world_size
 
