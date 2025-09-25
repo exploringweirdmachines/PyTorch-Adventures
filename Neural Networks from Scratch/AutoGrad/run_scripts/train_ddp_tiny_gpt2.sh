@@ -9,14 +9,13 @@ python -m mytorch.distributed.launch --num_gpus 2 --training_script train_ddp_ti
     --data_path $DATA_LINK \
     --train_iterations 2500 \
     --warmup_steps 250 \
-    --batch_size 32 \
+    --batch_size 64 \
     --max_lr "3e-4" \
     --min_lr "5e-5" \
     --weight_decay 0.1 \
     --max_grad_norm 1.0 \
-    --gradient_accumulation 1 \
+    --gradient_accumulation 4 \
     --log_iter 100 \
     --gen_iter 500 \
     --gen_length 256 \
-    --save_path "work_dir/char_shakespear_gpt2.safetensors" \
-    --log_wandb
+    --save_path "work_dir/char_shakespear_gpt2.safetensors"
