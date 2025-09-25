@@ -5,7 +5,7 @@ python train_tiny_gpt2.py \
     --embed_dim 384 \
     --num_heads 6 \
     --num_blocks 6 \
-    --dropout 0.1 \
+    --dropout 0.0 \
     --mlp_ratio 4 \
     --data_path $DATA_LINK \
     --train_iterations 5000 \

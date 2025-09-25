@@ -21,6 +21,9 @@ def main(args):
     NUM_BLOCKS = args.num_blocks
     DROPOUT_P = args.dropout
     MLP_RATIO = args.mlp_ratio
+    USE_BIAS = args.use_bias
+
+    ### DATA PARAMETERS ###
     PATH_TO_DATA = args.data_path
     USE_GPT2_TOKENIZER = args.use_gpt2_tokenizer
 
@@ -133,7 +136,8 @@ def main(args):
                 num_heads=NUM_HEADS, 
                 num_blocks=NUM_BLOCKS, 
                 dropout_p=DROPOUT_P, 
-                mlp_ratio=MLP_RATIO)
+                mlp_ratio=MLP_RATIO,
+                use_bias=USE_BIAS)
 
 
     total_params = 0
@@ -260,6 +264,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_blocks", type=int, default=6)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--mlp_ratio", type=int, default=4)
+    parser.add_argument("--use_bias", action="store_true")
     parser.add_argument("--data_path", type=str, required=True)
     parser.add_argument("--use_gpt2_tokenizer", action="store_true")
 
