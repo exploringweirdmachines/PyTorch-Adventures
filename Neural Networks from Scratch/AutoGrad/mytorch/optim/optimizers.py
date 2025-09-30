@@ -1,4 +1,4 @@
-import cupy as cp
+import mytorch
 
 class Optimizer:
     def step(self):
@@ -16,7 +16,7 @@ class SGD(Optimizer):
 
         for param in self.parameters:
             if param.requires_grad:
-                param.data -= param.grad * self.lr
+                param.data = param.grad - param.grad * self.lr
 
     def zero_grad(self):
         for param in self.parameters:
@@ -25,29 +25,33 @@ class SGD(Optimizer):
 
 class Adam(Optimizer):
     def __init__(self, parameters, lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0):
+        
         # Only keep trainable parameters
         self.params = [p for p in parameters if p.requires_grad]
+
         self.lr = lr
         self.beta1 = beta1
         self.beta2 = beta2
         self.eps = eps
         self.weight_decay = weight_decay
 
-        self.m = [cp.zeros_like(p.data) for p in self.params]
-        self.v = [cp.zeros_like(p.data) for p in self.params]
+        self.m = [mytorch.zeros_like(p).data for p in self.params]
+        self.v = [mytorch.zeros_like(p).data for p in self.params]
 
         self.t = 0
         self.beta1_pow = 1.0
         self.beta2_pow = 1.0
 
     def step(self):
+
         self.t += 1
         self.beta1_pow *= self.beta1
         self.beta2_pow *= self.beta2
 
-        lr_t = self.lr * cp.sqrt(1 - self.beta2_pow) / (1 - self.beta1_pow)
+        lr_t = self.lr * (1 - self.beta2_pow)**0.5 / (1 - self.beta1_pow)
 
         for i, p in enumerate(self.params):
+            
             g = p.grad
 
             # Apply standard weight decay (L2)
@@ -63,8 +67,8 @@ class Adam(Optimizer):
             self.v[i] += (1 - self.beta2) * (g ** 2)
 
             # Parameter update
-            p.data -= lr_t * self.m[i] / (cp.sqrt(self.v[i]) + self.eps)
-
+            p.data = p.data - lr_t * self.m[i] / (self.v[i]**0.5 + self.eps)
+    
     def zero_grad(self):
         for p in self.params:
             p.grad = None
@@ -79,21 +83,23 @@ class AdamW(Optimizer):
         self.eps = eps
         self.weight_decay = weight_decay
 
-        self.m = [cp.zeros_like(p.data) for p in self.params]
-        self.v = [cp.zeros_like(p.data) for p in self.params]
+        self.m = [mytorch.zeros_like(p).data for p in self.params]
+        self.v = [mytorch.zeros_like(p).data for p in self.params]
 
         self.t = 0
         self.beta1_pow = 1.0
         self.beta2_pow = 1.0
 
     def step(self):
+
         self.t += 1
         self.beta1_pow *= self.beta1
         self.beta2_pow *= self.beta2
 
-        lr_t = self.lr * cp.sqrt(1 - self.beta2_pow) / (1 - self.beta1_pow)
+        lr_t = self.lr * (1 - self.beta2_pow)**0.5 / (1 - self.beta1_pow)
 
         for i, p in enumerate(self.params):
+
             g = p.grad
 
             # Update biased first moment estimate
@@ -105,13 +111,13 @@ class AdamW(Optimizer):
             self.v[i] += (1 - self.beta2) * (g ** 2)
 
             # Parameter update
-            denom = cp.sqrt(self.v[i]) + self.eps
+            denom = self.v[i]**0.5 + self.eps
             step_size = lr_t * self.m[i] / denom
-            p.data -= step_size
+            p.data = p.data - step_size  
 
             # Apply decoupled weight decay directly to the parameter
             if self.weight_decay != 0.0:
-                p.data -= self.lr * self.weight_decay * p.data
+                p.data = p.data - self.lr * self.weight_decay * p.data
 
     def zero_grad(self):
         for p in self.params:
