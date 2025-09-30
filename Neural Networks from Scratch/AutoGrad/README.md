@@ -37,7 +37,7 @@ Build a relatively robust Deep Learning Framework, using [CuPy](https://docs.cup
 | Reshape      | ✅          |
 | **Flatten**  | ❌          |
 | **Concatenate** | ❌       |
-| **Split / Chunk** | ❌     |
+| **Chunk**     | ✅         |
 
 ### Pointwise Functions
 | Operation    | Implemented |
@@ -58,9 +58,9 @@ Build a relatively robust Deep Learning Framework, using [CuPy](https://docs.cup
 | Operation         | Impl | Auto Backward | Manual Backward |
 |-------------------|------|---------------|-----------------|
 | Conv2d            | ✅   | ❌            | ✅              |
-| ConvTranspose2d   | ❌   | ❌            | ❌              |
-| Conv1d            | ❌   | ❌            | ❌              |
-| ConvTranspose1d   | ❌   | ❌            | ❌              |
+| ConvTranspose2d   | ✅   | ❌            | ✅              |
+| Conv1d            | ✅   | ❌            | ✅              |
+| ConvTranspose1d   | ✅   | ❌            | ✅              |
 | MaxPool2d         | ✅   | ❌            | ✅              |
 | AvgPool2d         | ✅   | ❌            | ✅              |
 | AdaptiveAvgPool2d | ✅   | ❌            | ✅              |
