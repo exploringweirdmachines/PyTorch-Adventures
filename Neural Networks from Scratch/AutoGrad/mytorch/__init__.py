@@ -12,7 +12,7 @@ if int(cc_major) >= 8:
 
 from .tensor import Tensor, no_grad, zeros, ones, empty, full, \
     arange, linspace, eye, tril, randn, rand, randint, zeros_like, \
-        ones_like, empty_like
+        ones_like, empty_like, randn_like, rand_like
 
 from .dtypes import *
 from .nn import *
