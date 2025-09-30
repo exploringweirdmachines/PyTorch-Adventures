@@ -1,5 +1,10 @@
-
+"""
+All modules will be set on the CPU (numpy) 
+but can easily be moved to cuda internally
+using .to()!
+"""
 import math
+import numpy as np
 import cupy as cp
 from ..tensor import Tensor
 from . import functional as F
@@ -9,14 +14,14 @@ from . import functional as F
 ######################
 class Module:
     def __init__(self):
-        # use object.__setattr__ to avoid recursion
+        
         self._parameters = {}
         self._modules = {}
         self._buffers = {}
         self.training = True
 
     def __setattr__(self, name, value):
-        # Catch the common mistake: forgot super().__init__()
+
         if "_modules" not in self.__dict__:
             if isinstance(value, (Module, Tensor)):
                 raise RuntimeError(
@@ -41,7 +46,12 @@ class Module:
             memo = set()
 
         for param in self._parameters.values():
-            ptr = param.data.data.ptr
+
+            if "cuda" in param.device:
+                ptr = param.data.data.ptr
+            else:
+                ptr = id(param.data)
+
             if param is not None and ptr not in memo:
                 memo.add(ptr)
                 yield param
@@ -54,7 +64,12 @@ class Module:
             memo = set()
 
         for name, param in self._parameters.items():
-            ptr = param.data.data.ptr
+
+            if "cuda" in param.device:
+                ptr = param.data.data.ptr
+            else:
+                ptr = id(param.data)
+
             if param is not None and ptr not in memo:
                 memo.add(ptr)
                 full = f"{prefix}{name}" if prefix else name
@@ -63,6 +78,28 @@ class Module:
         for name, m in self._modules.items():
             sub_prefix = f"{prefix}{name}." if prefix else f"{name}."
             yield from m.named_parameters(sub_prefix, memo)
+
+    def to(self, device):
+        """
+        Moves all parameters and buffers of this module to the given device.
+        """
+        # Move parameters
+        for name, param in self._parameters.items():
+            if param is not None:
+                self._parameters[name] = param.to(device)
+                object.__setattr__(self, name, self._parameters[name])
+
+        # Move buffers
+        for name, buf in self._buffers.items():
+            if buf is not None:
+                self._buffers[name] = buf.to(device)
+                object.__setattr__(self, name, self._buffers[name])
+
+        # Recursively move submodules
+        for m in self._modules.values():
+            m.to(device)
+
+        return self
 
     def register_buffer(self, name, tensor):
         if not isinstance(tensor, Tensor):
@@ -105,20 +142,57 @@ class Module:
         """
         Returns a dictionary of all parameters as NumPy arrays (CPU-friendly).
         """
-        return {name: cp.asnumpy(tensor.data) for name, tensor in self.named_parameters()}
+        state = {}
+
+        for name, param  in self.named_parameters():
+            if "cuda" in param.device:
+                state[name] = cp.asnumpy(param.data)
+            else:
+                state[name] = param.data
+
+        for name, buf in self._buffers.items():
+            if buf is not None:
+                if "cuda" in buf.device:
+                    state[name] = cp.asnumpy(buf.data)
+                else:
+                    state[name] = buf.data
+
+        return state
     
-    def load_state_dict(self, state_dict, strict=True):
+    def load_state_dict(self, state_dict, strict=True, device="cpu"):
         """
-        Loads parameters from a state_dict (NumPy arrays), converting to CuPy.
+        Loads parameters and buffers from a state_dict (NumPy arrays).
+        
+        Args:
+            state_dict: dict of parameter/buffer names to NumPy arrays.
+            strict: whether to enforce exact key match.
+            device: "cpu" or "cuda" — where to load the arrays.
         """
         missing_keys = []
         unexpected_keys = list(state_dict.keys())
 
+        # Utility to move arrays to correct backend ###
+        ### Default to float32 here ###
+        def to_device(array):
+            if device == "cuda":
+                return cp.asarray(array, dtype=cp.float32)
+            else:
+                return array.astype(np.float32)
+
+        # Load parameters
         for name, param in self.named_parameters():
             if name in state_dict:
-                # Convert NumPy array to CuPy and copy into Tensor
-                param.data[:] = cp.asarray(state_dict[name], dtype=cp.float32)
+                param.data[:] = to_device(state_dict[name])
                 unexpected_keys.remove(name)
+            else:
+                missing_keys.append(name)
+
+        # Load buffers
+        for name, buf in self._buffers.items():
+            if name in state_dict:
+                buf.data[:] = to_device(state_dict[name])
+                if name in unexpected_keys:
+                    unexpected_keys.remove(name)
             else:
                 missing_keys.append(name)
 
@@ -146,7 +220,6 @@ class Module:
 ###############################
 ### STACK MODULES INTO LIST ###
 ###############################
-
 class ModuleList(Module):
     def __init__(self, modules=None):
         super().__init__()
@@ -209,7 +282,6 @@ class Sequential(Module):
     def _extra_repr(self):
         return ", ".join([layer.__class__.__name__ for layer in self.layers])
 
-
 #######################
 ### STANDARD LAYERS ###
 #######################
@@ -226,26 +298,28 @@ class Linear(Module):
 
         k = math.sqrt(1 / in_features)
         self.weight = Tensor(
-            cp.random.uniform(-k, k, size=(in_features, out_features), dtype=cp.float32),
-            requires_grad=True
+            np.random.uniform(-k, k, size=(out_features, in_features)),
+            requires_grad=True,
         )
 
         if self.bias:
+            self.use_bias = True
             self.bias = Tensor(
-                cp.random.uniform(-k, k, size=(out_features,), dtype=cp.float32),
-                requires_grad=True
+                np.random.uniform(-k, k, size=(out_features,)),
+                requires_grad=True,
             )
         else:
+            self.use_bias = False
             self.bias = None
 
     def __call__(self, x):
         return self.forward(x)
 
     def __repr__(self):
-        return f"Linear(in_features={self.in_features}, out_features={self.out_features}, bias={self.bias})"
+        return f"Linear(in_features={self.in_features}, out_features={self.out_features}, bias={self.use_bias})"
     
     def _extra_repr(self):
-        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias}"
+        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.use_bias}"
     
     def forward(self, x: Tensor):
         output = F.linear(x, weight=self.weight, bias=self.bias, auto=self.auto)
@@ -257,7 +331,11 @@ class Embedding(Module):
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
 
-        self.weight = Tensor((cp.random.randn(num_embeddings, embedding_dim) / cp.sqrt(num_embeddings)).astype(cp.float32), requires_grad=True)
+        limit = 1.0 / np.sqrt(embedding_dim)
+        self.weight = Tensor(
+            np.random.uniform(-limit, limit, size=(num_embeddings, embedding_dim)).astype(np.float32),
+            requires_grad=True
+        )
 
     def __call__(self, indices):
         return self.forward(indices)
@@ -305,13 +383,13 @@ class Conv2d(Module):
         # Kaiming initialization (like PyTorch default for conv2d)
         k = math.sqrt(3 / (in_channels * kernel_size * kernel_size))
         self.W = Tensor(
-            cp.random.uniform(-k, k, size=(out_channels, in_channels, kernel_size, kernel_size), dtype=cp.float32),
+            np.random.uniform(-k, k, size=(out_channels, in_channels, kernel_size, kernel_size), dtype=cp.float32),
             requires_grad=True
         )
 
         if bias:
             self.b = Tensor(
-                cp.random.uniform(-k, k, size=(out_channels,), dtype=cp.float32),
+                np.random.uniform(-k, k, size=(out_channels,), dtype=cp.float32),
                 requires_grad=True
             )
         else:
@@ -442,10 +520,10 @@ class LayerNorm(Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.auto = auto
-        self.weight = Tensor(cp.ones(shape=(embed_dim), dtype=cp.float32), requires_grad=True)
+        self.weight = Tensor(np.ones(shape=(embed_dim), dtype=np.float32), requires_grad=True)
 
         if bias:
-            self.bias = Tensor(cp.zeros(shape=(embed_dim), dtype=cp.float32), requires_grad=True)
+            self.bias = Tensor(np.zeros(shape=(embed_dim), dtype=np.float32), requires_grad=True)
         else:
             self.bias = None
 
@@ -470,12 +548,12 @@ class BatchNorm2d(Module):
         self.momentum = momentum
 
         # Learnable parameters
-        self.gamma = Tensor(cp.ones(num_features, dtype=cp.float32), requires_grad=True)
-        self.beta = Tensor(cp.zeros(num_features, dtype=cp.float32), requires_grad=True)
+        self.gamma = Tensor(np.ones(num_features, dtype=np.float32), requires_grad=True)
+        self.beta = Tensor(np.zeros(num_features, dtype=np.float32), requires_grad=True)
 
         # Non-trainable buffers
-        self.register_buffer("running_mean", Tensor(cp.zeros(num_features, dtype=cp.float32)))
-        self.register_buffer("running_var", Tensor(cp.ones(num_features, dtype=cp.float32)))
+        self.register_buffer("running_mean", Tensor(np.zeros(num_features, dtype=np.float32)))
+        self.register_buffer("running_var", Tensor(np.ones(num_features, dtype=np.float32)))
 
     def forward(self, x):
         return F.batchnorm(

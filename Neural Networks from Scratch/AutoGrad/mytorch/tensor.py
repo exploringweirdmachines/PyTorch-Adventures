@@ -1,31 +1,2774 @@
-import os
+# import os
+# import numpy as np
+# import cupy as cp
+# import weakref
+# from contextlib import contextmanager
+# import warnings
+# from . import _array as ap
+
+# ##### QUICK ENABLE FOR TENSOR CORE OPS ###
+# device = cp.cuda.Device()
+# # string containing the major index and the minor index. 
+# # For example, compute capability 3.5 is represented by the string ‘35’.
+# cc_major, cc_minor = device.compute_capability 
+# if int(cc_major) >= 8:
+#     os.environ["CUPY_TF32"] = "1"
+# ##########################################
+    
+# def cupy_prod(x, axis=None, dtype=None, keepdims=False):
+#     """
+#     Quick helper method as cp.prod(x) doesnt work if x is a list
+#     unlike numpy that internally converts to numpy array before 
+#     doing the prod
+#     """
+#     if not isinstance(x, cp.ndarray):
+#         x = cp.array(x)
+#     return cp.prod(x, axis=axis, dtype=dtype, keepdims=keepdims).astype(x.dtype)
+
+# @contextmanager
+# def no_grad():
+#     old_state = Tensor._build_graph
+#     Tensor._build_graph = False
+#     try:
+#         # Yield is where we get the 'with' statement to execute
+#         yield
+#     finally:
+#         # Finally ensures that no matter what the original _build_graph is restored
+#         Tensor._build_graph = old_state
+
+# class Tensor:
+    
+#     _build_graph = True
+
+#     def __init__(self, 
+#                  data, 
+#                  requires_grad=False,
+#                  grad_fn=None, 
+#                  grad_fn_name=None,
+#                  device=None,
+#                  dtype=None):
+        
+#         ### If our data is not an Array type, convert it ###
+#         ### Array handles everything regarding our basic ops ###
+#         ### device, dtype, and anything else numpy would do ###
+#         self._data = ap.Array(data=data, 
+#                               device=device, 
+#                               dtype=dtype)
+        
+#         ### Set Autograd Variables ### 
+#         self.requires_grad = requires_grad
+#         self.grad_fn = grad_fn
+#         self.grad_fn_name = grad_fn_name
+#         self.grad = None
+#         self._is_leaf = self.requires_grad and (self.grad_fn is None)
+#         self._parents = ()
+
+#     @property
+#     def xp(self):
+#         return self._data.xp
+
+#     @property
+#     def data(self):
+#         """
+#         simple (view) access to data
+#         """
+#         return self._data
+    
+#     @property
+#     def dtype(self):
+#         return self._data.dtype
+    
+#     @property
+#     def device(self):
+#         return self._data.device
+    
+#     @data.setter
+#     def data(self, value):
+#         self._data = ap.Array(value)
+#         return self
+    
+#     @property
+#     def shape(self):
+#         return self._data.shape
+    
+#     @property
+#     def is_leaf(self):
+#         return self._is_leaf
+    
+#     def __repr__(self):
+#         """
+#         Pretty printing
+#         """
+
+#         ### Access underlying _array for printing only ! ###
+#         data = self.data._array
+
+#         # Convert array to string
+#         data_str = self.xp.array2string(
+#             data,
+#             separator=" ",
+#             precision=5,
+#             floatmode="fixed",
+#             max_line_width=80
+#         )
+
+#         # Indent all lines after the first like PyTorch
+#         lines = data_str.split("\n")
+#         if len(lines) > 1:
+#             indent = " " * len("tensor(")
+#             data_str = lines[0] + "\n" + "\n".join(indent + line for line in lines[1:])
+
+#         # Grad / requires_grad info
+#         grad_info = ""
+#         if getattr(self, "requires_grad", False):
+#             if getattr(self, "grad_fn", None) is not None:
+#                 grad_info = f", grad_fn={getattr(self, 'grad_fn_name', None)}"
+#             else:
+#                 grad_info = ", requires_grad=True"
+
+#         # Device info
+#         device_info = ""
+#         if "cuda" in self.device:
+#             device_info = f", device={self.device}"
+
+#         # Final string
+#         return f"tensor({data_str}{grad_info}{device_info})"
+    
+#     def to(self, device):
+#         ### use the setter of our data attribute to replace our ###
+#         ### existing self.data with the new one on the new device ###
+#         self.data = self.data.to(device)
+#         return self
+
+#     @classmethod
+#     def build_graph_enabled(cls):
+#         return cls._build_graph
+    
+#     @staticmethod
+#     def _check_broadcast(a, b):
+
+#         ## Verify that two numpy arrays are broadcastable ###
+#         ## This means a and b have the same number of dimensions ###
+#         ## I.E (1x3) + (1x1) summation is broadcasting
+
+#         ### We only really care about this when both a and b requires gradients ###
+#         ### as if they dont, then either a or b are just some constant ###
+
+#         ## Numpy technically supports broadcasting even when the dimensionality ###
+#         ## is not the same (1 x 3) + (1, ) but we wont for simplicity! ###
+#         if (len(a.shape) != len(b.shape)) and (a.requires_grad and b.requires_grad):
+#             raise ValueError(f"Incompatible Operation between {a.shape} and {b.shape}")
+
+#     def _broadcasted_grad_accumulate(self, x_shape, x_grad):
+
+#         grad_shape = x_grad.shape
+
+#         assert len(x_shape) == len(grad_shape), "Gradient and tensor shapes must be the same length! Only different by broadcasting"
+
+#         sum_axes = [idx for idx, (x_dim, grad_dim) in enumerate(zip(x_shape, grad_shape)) if x_dim == 1 and grad_dim != 1]
+#         if sum_axes:
+#             x_grad = self.xp.sum(x_grad, axis=tuple(sum_axes), keepdims=True)
+
+#         return x_grad
+    
+#     def retain_grad(self):
+        
+#         if not self._warn_retaingrad:
+#             warnings.warn(
+#                 "You are retaining graph, intermediate gradients may not be cleared!!"
+#             )
+#         ### Leaf Tensors always retain grad ###
+#         if self.is_leaf:
+#             return 
+
+#         self._retain_grad = True
+
+#     def backward(self, grad=None):
+        
+#         # Initialize output gradient
+#         if grad is None:
+#             grad = self.xp.ones_like(self.data, dtype=self.data.dtype)
+#         self.grad = grad
+ 
+#         # Build topo-order
+#         visited = set()
+#         topo_order = []
+
+#         def build_topo(t):
+#             if id(t) in visited:
+#                 return
+#             visited.add(id(t))
+#             parents = getattr(t, "_parents", ())
+#             if parents is None:
+#                 parents = []
+#             for parent_ref in parents:
+#                 parent = parent_ref()
+#                 if parent is not None:
+#                     build_topo(parent)
+#             topo_order.append(t)
+
+#         build_topo(self)
+
+#         # Iterate in reverse topological order
+#         for t in reversed(topo_order):
+#             if t.grad_fn is not None:
+#                 t.grad_fn(t.grad)  # accumulate into parents
+                
+#                 ### Drop references immediately ###
+#                 if not getattr(t, "_retain_grad", False):
+#                     # Clear backward references so they can be GC'ed
+#                     t.grad_fn = None
+#                     t._parents = None
+
+#             if not t.is_leaf:
+#                 t.grad = None
+  
+#     def __add__(self, val):
+
+#         """
+#         Sum of two tensors (with accumulation for brodcasting)
+#         O = A + B
+#         dO/dA = 1
+#         dO/dB = 1
+#         """
+
+#         ### If Val is a Tensor, Then Check Devices ###
+#         if isinstance(val, Tensor): 
+
+#             ### Check Broadcast Shape ###
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+
+#         ### If we are just summing with an scalar ###
+#         ### Just cast to our dtype without any issues ###
+#         else:
+#             val_data = self.xp.array(val, dtype=self.dtype)
+#             val_requires_grad = False
+#             val_shape = None
+        
+#         ### Use standard __add__ to actually add tensors together ###
+#         output = self.xp.empty_like(self.data)
+#         self.xp.add(self.data, val_data, out=output)
+        
+#         ### Define Backward Function ###
+#         def _add_backward(input_grad):
+
+#             if self.requires_grad:
+#                 self_grad = self._broadcasted_grad_accumulate(self.shape, input_grad)
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+                
+#                 self_grad = None
+
+#             if val_requires_grad:
+#                 val_grad = self._broadcasted_grad_accumulate(val_shape, input_grad)
+#                 if val.grad is None:
+#                     val.grad = val_grad
+#                 else:
+#                     val.grad += val_grad
+
+#                 val_grad = None
+
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         output = Tensor(output,
+#                         requires_grad=requires_grad,
+#                         grad_fn=_add_backward if requires_grad else None,
+#                         grad_fn_name="<AddBackward>" if requires_grad else None,
+#                         device=self.device)
+
+#         ### Set Parents ###
+#         if requires_grad:
+#             output._add_parents(self, val if isinstance(val, Tensor) else None)
+
+#         return output
+
+#     def __radd__(self, val):
+
+#         """
+#         add is not an ordered operation, A + B is the same as B + A
+
+#         In A + B, our self is A and val is B
+#         When we do A + B, what is really happening is A.__add__(B). 
+
+#         But if A is an integer and B is a Tensor, python integers dont know how to work with our
+#         own tensor operations. This will throw an error and then try __radd__.  
+    
+#         __radd__ will reverse the operands and do B.__add__(A), using our own Tensor __add__ written above instead.  
+#         Our __add__ we wrote for the tensor does know how to interface python numbers and tensors so we can then do the operation!
+
+#         """
+#         return self + val
+    
+#     def __iadd__(self, val):
+#         """
+#         Inplace operation to enable self += val
+#             - prevent inplace operation on leaf tensors that require grad
+#             - tracks version for non-leaf tensors to see if there is a mismatch
+        
+#         The problem is, leaf tensors for us are typically our parameters. So we typically only
+#         want to change them through our gradient updates. On the other hand, if I manually change
+#         them in place, i dont really know what to do with that. PyTorch for this reason just simplifies
+#         it and throws an error any time we are tracking gradients on a leaf tensor and apply some inplace op. 
+
+#         On the other hand, on non-leaf tensors (created through performing ops on our leaf tensors) it is 
+#         still fine for the most part but with a condition. During our forward propagation, the metadata from
+#         that graph is stored for backprop. Now if I manually change something in the graph inplace, 
+#         that graph is no longer storing the correct information and backprop wont be accurate anymore. 
+
+#         Thus pytorch employs a versioning index, and every inplace op increments the version. If there 
+#         is a mismatch during backprop between the version that was on the graph and the version thats 
+#         currently there (indicating some inplace op happened after graph creation), then we raise and error. 
+        
+#         Technically, we should just never do inplace ops, because what are you really saving?? 
+        
+#         a+=b vs a = a + b... 
+
+#         wow...
+
+#         Either way lets implement it to still have something close to torch!
+#         """
+
+#         if self.requires_grad and self.is_leaf:
+#             raise RuntimeError("A leaf Tensor that requires grad is being used in an in-place operation")
+        
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+#         else:
+#             val_data = self.xp.array(val, dtype=self.dtype)
+#             val_requires_grad = False
+#             val_shape = None
+        
+#         ### Capture current version of the tensor ###
+#         saved_version = getattr(self, "_version", 0)
+
+#         ### Capture the old grad function to use ###
+#         old_self_grad_fn = getattr(self, "grad_fn", None)
+#         old_val_grad_fn = getattr(val, "grad_fn", None)
+
+#         ### inplace op ###
+#         self.data += val_data
+
+#         ### increment version (default 0 if it doesn't exist but it should always) ###
+#         self._version = getattr(self, "_version", 0) + 1
+        
+#         ### Handle Backward with versioning ###
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         if requires_grad:
+#             def _iadd_backward(input_grad):
+#                 # Version check on leaf tensors where we really care ###
+#                 if self.is_leaf and self._version != saved_version + 1:
+#                     raise RuntimeError(
+#                         "one of the variables needed for gradient computation "
+#                         "has been modified by an in-place operation"
+#                     )
+
+#                 ### If we arent a leaf tensor we just use our original grad fn ###
+#                 if self.requires_grad:
+#                     grad_self = self._broadcasted_grad_accumulate(self.shape, input_grad)
+                    
+#                     ### If a leaf tensor just accumulate grads like normal ###
+#                     if self.is_leaf or getattr(self, "_retrain_grad", False):
+#                         if self.grad is None:
+#                             self.grad = grad_self
+#                         else:
+#                             self.grad += grad_self
+
+#                     ### If not a leaf tensor, just use the old grad function ###
+#                     elif not self.is_leaf and old_self_grad_fn is not None:
+#                         old_self_grad_fn(grad_self)
+                    
+#                 if val_requires_grad:
+    
+#                     grad_val = val._broadcasted_grad_accumulate(val_shape, input_grad)
+#                     if val.is_leaf or getattr(val, "_retrain_grad", False):
+#                         if val.grad is None:
+#                             val.grad = grad_val
+#                         else:
+#                             val.grad += grad_val
+                        
+#                     elif not self.is_leaf and old_val_grad_fn is not None:
+#                         old_val_grad_fn(grad_val)
+
+#             self.grad_fn = _iadd_backward
+#             self.grad_fn_name = "<IAddBackward>"
+
+#         return self
+
+#     def __sub__(self, val):
+
+#         """
+#         Same as __add__ but now subtraction (with accumulation for broadcasting)
+#         O = A - B
+#         dO/dA = 1
+#         dO/dB = -1
+#         """
+
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+
+#         else:
+#             val_data = self.xp.array(val, dtype=self.dtype)
+#             val_requires_grad = False
+#             val_shape = None
+
+#         output = self.xp.empty_like(self.data)
+#         self.xp.subtract(self.data, val_data, out=output)
+        
+#         ### Define Backward Function ###
+#         def _sub_backward(input_grad):
+#             if self.requires_grad:
+#                 # self_grad = input_grad
+#                 self_grad = self._broadcasted_grad_accumulate(self.shape, input_grad)
+                
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#             if val_requires_grad:
+#                 # val_grad = -input_grad
+#                 val_grad = self._broadcasted_grad_accumulate(val_shape, -input_grad)
+                
+#                 if val.grad is None:
+#                     val.grad = val_grad
+#                 else:
+#                     val.grad += val_grad
+
+#                 val_grad = None
+
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         output = Tensor(output,
+#                         requires_grad=requires_grad,
+#                         grad_fn=_sub_backward if requires_grad else None,
+#                         grad_fn_name="<SubBackward>" if requires_grad else None,
+#                         device=self.device)
+        
+#         if requires_grad:
+#             output._add_parents(self, val if isinstance(val, Tensor) else None)
+        
+#         return output
+    
+#     def __rsub__(self, val):
+
+#         """
+#         Subtraction is an ordered operation. Lets say we want A - B where A is self and B is val
+#         if A is not a tensor (i.e. an int or float), __sub__ will throw an error as it doesnt know
+#         how to do an operation with our own tensor.
+
+#         This will enter __rsub__ where we flip the operands where B is now self and A is val. If we want
+#         A - B, we need to do -1 * B + A, using our __add__. 
+
+#         There are a bunch of ways to handle these exceptions, this is just one of them!
+#         """
+
+#         return -1 * self + val
+
+#     def __isub__(self, val):
+#         """
+#         Inplace op to enable self -= val
+#         """
+
+#         if self.requires_grad and self.is_leaf:
+#             raise RuntimeError("A leaf Tensor that requires grad is being used in an in-place operation")
+        
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+#         else:
+#             val_data = self.xp.array(val, dtype=self.dtype)
+#             val_requires_grad = False
+#             val_shape = None
+        
+#         ### Capture current version of the tensor ###
+#         saved_version = getattr(self, "_version", 0)
+
+#         ### Capture the old grad function to use ###
+#         old_grad_fn = getattr(self, "grad_fn", None)
+
+#         ### inplace op ###
+#         self.data -= val_data
+
+#         ### increment version (default 0 if it doesn't exist) ###
+#         self._version = getattr(self, "_version", 0) + 1
+
+#         ### Handle Backward with versioning ###
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         if requires_grad:
+#             def _isub_backward(input_grad):
+#                 # Version check
+#                 if self.is_leaf and self._version != saved_version + 1:
+#                     raise RuntimeError(
+#                         "one of the variables needed for gradient computation "
+#                         "has been modified by an in-place operation"
+#                     )
+
+#                 if self.requires_grad:
+#                     grad_self = self._broadcasted_grad_accumulate(self.shape, input_grad)
+                    
+#                     ### If a leaf tensor just accumulate grads like normal ###
+#                     if self.is_leaf:
+#                         if self.grad is None:
+#                             self.grad = grad_self
+#                         else:
+#                             self.grad += grad_self
+
+#                     ### If not a leaf tensor, just use the old grad function ###
+#                     else:
+#                         old_grad_fn(grad_self)
+                    
+#                 if val_requires_grad:
+#                     grad_val = val._broadcasted_grad_accumulate(val_shape, -input_grad)
+#                     if val.is_leaf:
+#                         if val.grad is None:
+#                             val.grad = grad_val
+#                         else:
+#                             val.grad += grad_val
+#                     else:
+#                         val.grad_fn(grad_val)
+
+#             self.grad_fn = _isub_backward
+#             self.grad_fn_name = "<ISubBackward>"
+
+#         return self
+
+#     def __mul__(self, val):
+
+#         """
+#         Element-wise multiplication of two tensors (with accumulation for broadcasting)
+
+#         O = A * B
+#         dO/dA = B
+#         do/dB = A
+#         """
+
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+
+#         else:
+#             val_data = self.xp.array(val, dtype=self.dtype)
+#             val_requires_grad = False
+#             val_shape = None
+            
+#         output = self.xp.empty_like(self.data)
+#         self.xp.multiply(self.data, val_data, out=output)
+
+#         def _mul_backward(input_grad):
+
+#             if self.requires_grad:
+#                 self_grad = self.xp.empty_like(input_grad)
+#                 self.xp.multiply(input_grad, val_data, out=self_grad)
+#                 self_grad = self._broadcasted_grad_accumulate(self.shape, self_grad)
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+                
+#                 self_grad = None
+
+#             if val_requires_grad:
+#                 val_grad = self.xp.empty_like(input_grad)
+#                 self.xp.multiply(input_grad, self.data, out=val_grad)
+#                 val_grad = self._broadcasted_grad_accumulate(val_shape, val_grad)
+#                 if val.grad is None:
+#                     val.grad = val_grad
+#                 else:
+#                     val.grad += val_grad
+
+#                 val_grad = None
+
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         output = Tensor(output, 
+#                         requires_grad=requires_grad, 
+#                         grad_fn=_mul_backward if requires_grad else None,
+#                         grad_fn_name="<MulBackward>" if requires_grad else None,
+#                         device=self.device)
+        
+#         if requires_grad:
+#             output._add_parents(self, val if isinstance(val, Tensor) else None)
+
+#         return output
+    
+#     def __rmul__(self, val):
+#         return self * val
+
+#     def __imul__(self, val):
+#         """
+#         Inplace op to enable self *= val
+#         """
+
+#         if self.requires_grad and self.is_leaf:
+#             raise RuntimeError("A leaf Tensor that requires grad is being used in an in-place operation")
+        
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+#         else:
+#             val_data = self.xp.array(val, dtype=self.dtype)
+#             val_requires_grad = False
+#             val_shape = None
+        
+#         ### Capture current version of the tensor ###
+#         saved_version = getattr(self, "_version", 0)
+
+#         ### Capture the old grad function to use ###
+#         old_grad_fn = getattr(self, "grad_fn", None)
+
+#         ### inplace op ###
+#         self.data *= val_data
+
+#         ### increment version (default 0 if it doesn't exist) ###
+#         self._version = getattr(self, "_version", 0) + 1
+
+#         ### Handle Backward with versioning ###
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         if requires_grad:
+#             def _imul_backward(input_grad):
+#                 # Only check version for leaf tensors
+#                 if self.is_leaf and self._version != saved_version + 1:
+#                     raise RuntimeError(
+#                         "one of the variables needed for gradient computation "
+#                         "has been modified by an in-place operation"
+#                     )
+
+#                 # Gradient w.r.t. self
+#                 if self.requires_grad:
+#                     grad_self = input_grad * val_data
+#                     grad_self = self._broadcasted_grad_accumulate(self.shape, grad_self)
+
+#                     if self.is_leaf:
+#                         if self.grad is None:
+#                             self.grad = grad_self
+#                         else:
+#                             self.grad += grad_self
+#                     else:
+#                         if old_grad_fn is not None:
+#                             old_grad_fn(grad_self)
+
+#                 # Gradient w.r.t. val
+#                 if val_requires_grad:
+#                     grad_val = input_grad * self.data
+#                     grad_val = val._broadcasted_grad_accumulate(val_shape, grad_val)
+
+#                     if val.is_leaf:
+#                         if val.grad is None:
+#                             val.grad = grad_val
+#                         else:
+#                             val.grad += grad_val
+#                     else:
+#                         if val.grad_fn is not None:
+#                             val.grad_fn(grad_val)
+
+#             self.grad_fn = _imul_backward
+#             self.grad_fn_name = "<IMulBackward>"
+
+#         return self
+
+#     def __neg__(self):
+#         return -1 * self
+
+#     def __matmul__(self, val):
+
+#         ### Preallocate Memory for MatMul ###
+#         non_matmul_shapes = self.shape[:-2]
+#         output_shape = (*non_matmul_shapes, self.data.shape[-2], val.data.shape[-1])
+#         prealloc = self.xp.empty(output_shape, dtype=self.dtype)
+
+#         ### Compute MatMul ###
+#         output_data = self.xp.matmul(self.data, val.data, out=prealloc)
+
+#         def _matmul_backward(input_grad):
+
+#             if self.requires_grad:
+#                 prealloc_grad_self = self.xp.empty(shape=self.shape, dtype=self.data.dtype)
+#                 grad_self = self.xp.matmul(input_grad, val.data.swapaxes(-1, -2), out=prealloc_grad_self)
+                
+#                 if self.grad is None:
+#                     self.grad = grad_self
+#                 else:
+#                     self.grad += grad_self
+
+#                 grad_self = None
+
+#             if val.requires_grad:
+#                 prealloc_grad_val = self.xp.empty(shape=val.shape, dtype=self.data.dtype)
+#                 grad_val = self.xp.matmul(self.data.swapaxes(-1, -2), input_grad, out=prealloc_grad_val)
+                
+#                 if val.grad is None:
+#                     val.grad = grad_val
+#                 else:
+#                     val.grad += grad_val
+                
+#                 grad_val = None
+
+#         requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             output_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_matmul_backward if requires_grad else None,
+#             grad_fn_name="<MatmulBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self, val)
+
+#         return out
+
+#     def __truediv__(self, val):
+
+#         """
+#         Element-wise Division of two tensors (accumulated grad for broadcasting)
+
+#         O = A/B
+#         dO/dA = 1/B
+#         dO/dB = -A/B^2
+
+#         """
+
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+
+#         else:
+#             val_data = self.xp.array(val, dtype=self.dtype)
+#             val_requires_grad = False
+#             val_shape = None
+
+#         output = self.data / val_data
+
+#         def _div_backward(input_grad):
+#             if self.requires_grad:
+#                 self_grad = input_grad / val_data
+#                 self_grad = self._broadcasted_grad_accumulate(self.shape, self_grad)
+                
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+                
+#                 self_grad = None
+
+#             if val_requires_grad:
+#                 val_grad = input_grad * -1 * self.data / (val_data**2)
+#                 val_grad = self._broadcasted_grad_accumulate(val_shape, val_grad)
+                
+#                 if val.grad is None:
+#                     val.grad = val_grad
+#                 else:
+#                     val.grad += val_grad
+                
+#                 val_grad = None
+        
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         output = Tensor(output,
+#                         requires_grad=requires_grad,
+#                         grad_fn=_div_backward if requires_grad else None,
+#                         grad_fn_name="<DivBackward>" if requires_grad else None,
+#                         device=self.device
+#                     )
+
+#         if requires_grad:
+#             output._add_parents(self, val if isinstance(val, Tensor) else None)
+
+#         return output
+
+#     def __rtruediv__(self, val):
+        
+#         """
+#         Div is an ordered operation. Lets say we want A/B, in the case of __div__ A is self and B is val. 
+#         if A is not a Tensor (i.e. an int or float), A / B will throw an error beacuse we only can divide a tensor by a tensor
+#         In this case, __rtruediv__ will be called where A is now val and B is self (the operands have been flipped)
+#         We can then convert A (our non-tensor) which is in val to a tensor and then perform val / self to call __div__ again where
+#         A and B are both now tensors
+#         """
+#         ### if val is not a tensor alredy, we will add as a constant without gradients ###
+#         if not isinstance(val, Tensor): 
+#             val = Tensor(val, dtype=self.dtype)
+#         return val / self
+
+#     def __itruediv__(self, val):
+#         """
+#         Inplace op to enable self /= val
+#         """
+
+#         if self.requires_grad and self.is_leaf:
+#             raise RuntimeError("A leaf Tensor that requires grad is being used in an in-place operation")
+        
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+#         else:
+#             val_data = self.xp.array(val, dtype=self.dtype)
+#             val_requires_grad = False
+#             val_shape = None
+        
+#         ### Capture current version of the tensor ###
+#         saved_version = getattr(self, "_version", 0)
+
+#         ### Capture the old grad function to use ###
+#         old_grad_fn = getattr(self, "grad_fn", None)
+
+#         ### inplace op ###
+#         self.data /= val_data
+
+#         ### increment version (default 0 if it doesn't exist) ###
+#         self._version = getattr(self, "_version", 0) + 1
+
+#         ### Handle Backward with versioning ###
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         if requires_grad:
+#             # Gradient w.r.t. self
+#             def _idiv_backward(input_grad):
+#                 # Only check version for leaf tensors
+#                 if self.is_leaf and self._version != saved_version + 1:
+#                     raise RuntimeError(
+#                         "one of the variables needed for gradient computation "
+#                         "has been modified by an in-place operation"
+#                     )
+
+#                 # Gradient w.r.t. self
+#                 if self.requires_grad:
+#                     grad_self = input_grad / val_data
+#                     grad_self = self._broadcasted_grad_accumulate(self.shape, grad_self)
+
+#                     if self.is_leaf:
+#                         if self.grad is None:
+#                             self.grad = grad_self
+#                         else:
+#                             self.grad += grad_self
+#                     else:
+#                         if old_grad_fn is not None:
+#                             old_grad_fn(grad_self)
+
+#                 # Gradient w.r.t. val
+#                 if val_requires_grad:
+#                     grad_val = input_grad * (-self.data / (val_data**2))
+#                     grad_val = val._broadcasted_grad_accumulate(val_shape, grad_val)
+
+#                     if val.is_leaf:
+#                         if val.grad is None:
+#                             val.grad = grad_val
+#                         else:
+#                             val.grad += grad_val
+#                     else:
+#                         if val.grad_fn is not None:
+#                             val.grad_fn(grad_val)
+
+#             self.grad_fn = _idiv_backward
+#             self.grad_fn_name = "<IDivBackward>"
+
+#         return self
+
+#     def __pow__(self, exponent):
+
+#         """
+#         Element-wise exponentiation of matrix (assuming exponent is non-learnable for simplicity)
+#         O = A^K
+#         dO/dA = K * A^(k-1)
+#         """
+
+#         output = self.data ** exponent
+    
+#         def _pow_backward(input_grad):
+#             self_grad = input_grad * (exponent * self.data ** (exponent-1))
+            
+#             if self.grad is None:
+#                 self.grad = self_grad
+#             else:
+#                 self.grad += self_grad
+
+#             self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         output = Tensor(output,
+#                         requires_grad=requires_grad,
+#                         grad_fn=_pow_backward if requires_grad else None,
+#                         grad_fn_name="<PowBackward>" if requires_grad else None,
+#                         device=self.device)
+        
+#         if requires_grad:
+#             output._add_parents(self)
+
+#         return output
+    
+#     def __getitem__(self, idx):
+#         """
+#         Supports slices, ints, arrays, and tuple-of-arrays indexing.
+#         """
+        
+#         # Convert Tensor indices to cp arrays
+#         if isinstance(idx, Tensor):
+#             idx = idx.data
+
+#         if isinstance(idx, (list, tuple)):
+#             idx = tuple(
+#                 (i.data.astype(self.xp.int64) if isinstance(i, Tensor) else self.xp.array(i, dtype=self.xp.int64))
+#                 if isinstance(i, (list, Tensor)) else i
+#                 for i in idx
+#             )
+
+#         out_data = self.data[idx]
+
+#         def _index_backward(input_grad):
+
+#             if self.requires_grad:
+#                 if self.grad is None:
+#                     self.grad = self.xp.zeros_like(self.data, dtype=self.data.dtype)
+
+#                 # Convert index to raw array if needed
+#                 actual_idx = idx
+#                 if isinstance(idx, Tensor):
+#                     actual_idx = idx.data
+#                 if isinstance(actual_idx, ap.Array):
+#                     actual_idx = actual_idx._array
+
+#                 # Elementwise assignment for fancy indexing
+#                 self.xp.add.at(self.grad, actual_idx, input_grad)
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(out_data,
+#                     requires_grad=requires_grad,
+#                     grad_fn=_index_backward if requires_grad else None,
+#                     grad_fn_name="<IndexBackward>" if requires_grad else None,
+#                     device=self.device)
+        
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def __eq__(self, other): # ==
+#         return Tensor(self.data == (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+
+#     def __ne__(self, other):  # !=
+#         return ~(self == other)
+
+#     def __lt__(self, other):  # <
+#         return Tensor(self.data < (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+
+#     def __le__(self, other):  # <=
+#         return Tensor(self.data <= (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+
+#     def __gt__(self, other):  # >
+#         return Tensor(self.data > (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+
+#     def __ge__(self, other):  # >=
+#         return Tensor(self.data >= (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+
+#     def __len__(self):
+#         return self.shape[0]
+    
+#     def transpose(self, dim1, dim2):
+#         """
+#         Swap two dimensions of the tensor.
+#         """
+#         out_data = self.data.swapaxes(dim1, dim2)
+ 
+#         def _transpose_backward(input_grad):
+#             # Just swap back the same two dims
+#             if self.requires_grad:
+#                 self_grad = input_grad.swapaxes(dim1, dim2)
+
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(out_data,
+#                     requires_grad=requires_grad,
+#                     grad_fn=_transpose_backward if requires_grad else None,
+#                     grad_fn_name="<TransposeBackward>" if requires_grad else None,
+#                     device=self.device)
+        
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def permute(self, *dims):
+#         """
+#         Permute tensor dimensions according to dims.
+#         Example: (0, 2, 1) will reorder axes in that order.
+#         """
+#         out_data = self.xp.transpose(self.data, axes=dims)
+
+#         def _permute_backward(input_grad):
+#             if self.requires_grad:
+#                 # Inverse permutation
+#                 inv_dims = self.xp.argsort(dims)
+#                 self_grad = self.xp.transpose(input_grad, axes=inv_dims)
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(out_data,
+#                     requires_grad=requires_grad,
+#                     grad_fn=_permute_backward if requires_grad else None,
+#                     grad_fn_name="<PermuteBackward>" if requires_grad else None,
+#                     device=self.device)
+        
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+
+#     def exp(self):
+#         """
+#         Element-wise exponentiation of the base e.
+#         O = e^A
+#         dO/dA = e^A
+#         """
+#         out_data = self.xp.exp(self.data)
+
+#         def _exp_backward(input_grad):
+#             if self.requires_grad:
+#                 self_grad = input_grad * out_data  # use forward output to save recomputation
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             out_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_exp_backward if requires_grad else None,
+#             grad_fn_name="<ExpBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def log(self):
+
+#         """
+#         Element-wise log with base e
+#         O = log(A)
+#         dO/dA = 1/a
+#         """
+
+#         output = self.xp.log(self.data)
+   
+#         def _log_backward(input_grad): 
+
+#             if self.requires_grad:
+#                 self_grad = input_grad * (1/self.data)
+
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+        
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         output = Tensor(output, 
+#                         requires_grad=requires_grad,
+#                         grad_fn=_log_backward if requires_grad else None, 
+#                         grad_fn_name="<LogBackward>" if requires_grad else None,
+#                         device=self.device)
+        
+#         if requires_grad:
+#             output._add_parents(self)
+
+#         return output
+
+#     def sum(self, dim=None, keepdims=False):
+#         """
+#         Sum across a dimension.
+#         Forward: output = self.data.sum(axis=dim, keepdims=keepdims)
+#         Backward: distribute incoming gradient to all elements along summed axes.
+#         """
+#         out_data = self.data.sum(axis=dim, keepdims=keepdims)
+
+#         def _sum_backward(input_grad):
+#             if self.requires_grad:
+#                 # Broadcast input gradient to input shape
+#                 self_grad = self.xp.broadcast_to(input_grad, self.shape)
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             out_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_sum_backward if requires_grad else None,
+#             grad_fn_name="<SumBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def mean(self, dim=None, keepdims=False):
+#         """
+#         Mean across a dimension.
+#         Forward: output = self.data.mean(axis=dim, keepdims=keepdims)
+#         Backward: broadcast incoming gradient and divide by number of elements summed.
+#         """
+
+#         ### if no dim is provided we reduce on all dims ###
+#         if dim is None:
+#             dim = tuple(range(len(self.shape)))
+
+#         out_data = self.data.mean(axis=dim, keepdims=keepdims)
+
+#         def _mean_backward(input_grad):
+
+#             if self.requires_grad:
+#                 # Compute number of elements reduced over
+#                 dims = dim if isinstance(dim, tuple) else (dim,)
+#                 num_vals_averaged = cupy_prod([self.shape[d] for d in dims])
+
+#                 # Broadcast upstream gradient and scale
+#                 self_grad = self.xp.broadcast_to(input_grad, self.shape) / num_vals_averaged
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             out_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_mean_backward if requires_grad else None,
+#             grad_fn_name="<MeanBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def var(self, dim=None, keepdims=False):
+#         """
+#         Variance along a given dimension.
+#         Var = mean((x - mean(x))^2)
+        
+#         Backward: dVar/dx = 2 * (x - mean(x)) / N * input_grad
+#         """
+
+#         ### if no dim is provided we reduce on all dims ###
+#         if dim is None:
+#             dim = tuple(range(len(self.shape)))
+
+#         # Forward pass
+#         mean_vals = self.data.mean(axis=dim, keepdims=True)
+#         var_vals = ((self.data - mean_vals) ** 2).mean(axis=dim, keepdims=keepdims)
+
+#         def _var_backward(input_grad):
+#             if self.requires_grad:
+#                 # Broadcast input gradient to input shape
+#                 input_grad_broadcast = self.xp.broadcast_to(input_grad, self.shape)
+                
+#                 # Number of elements reduced over
+#                 dims = dim if isinstance(dim, tuple) else (dim,)
+#                 num_vals_reduced = cupy_prod([self.shape[d] for d in dims])
+                
+#                 # Gradient formula: 2/N * (x - mean(x)) * upstream gradient
+#                 centered = self.data - mean_vals
+#                 self_grad = 2.0 * centered * input_grad_broadcast / num_vals_reduced
+
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+                
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             var_vals,
+#             requires_grad=requires_grad,
+#             grad_fn=_var_backward if requires_grad else None,
+#             grad_fn_name="<VarBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+
+#     def max(self, dim=None, keepdims=False):
+#         """
+#         Compute max along axis with autograd support.
+#         Only propagate gradient to the positions where the maximum occurred.
+#         """
+
+#         ### if no dim is provided we reduce on all dims ###
+#         if dim is None:
+#             dim = tuple(range(len(self.shape)))
+            
+#         out_data = self.data.max(axis=dim, keepdims=keepdims)
+
+#         def _max_backward(input_grad):
+            
+#             if self.requires_grad:
+
+#                 grad = self.xp.zeros_like(self.data, dtype=self.data.dtype)
+
+#                 # Broadcast input_grad if needed
+#                 if dim is not None and not keepdims:
+#                     input_grad = self.xp.expand_dims(input_grad, dim)
+
+#                 # Broadcast to match self shape
+#                 input_grad = input_grad * self.xp.ones_like(self.data, dtype=self.data.dtype)
+                
+#                 # Only propagate gradient to positions where max occurred
+#                 mask = (self.data == (out_data if keepdims else self.xp.expand_dims(out_data, dim)))
+#                 grad += input_grad * mask
+    
+#                 # Call backward on self
+#                 if self.grad is None:
+#                     self.grad = grad
+#                 else:
+#                     self.grad += grad
+
+#                 grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             out_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_max_backward if requires_grad else None,
+#             grad_fn_name="<MaxBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def argmax(self, dim=-1):
+#         """
+#         Compute the indices of the maximum value along a dimension.
+#         Note: argmax is non-differentiable.
+#         """
+#         out_data = self.data.argmax(axis=dim)
+
+#         def _argmax_backward(input_grad):
+#             # No gradient flows through argmax
+#             return self.xp.zeros_like(self.data, dtype=self.data.dtype)
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             out_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_argmax_backward if requires_grad else None,
+#             grad_fn_name="<ArgmaxBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def reshape(self, *shape):
+#         """
+#         Reshape the tensor. Gradients are reshaped back to the original shape during backprop.
+#         """
+#         out_data = self.data.reshape(*shape)
+
+#         def _reshape_backward(input_grad):
+#             if self.requires_grad:
+#                 self_grad = input_grad.reshape(self.data.shape)
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             out_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_reshape_backward if requires_grad else None,
+#             grad_fn_name="<ReshapeBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+
+#     def _add_parents(self, *parents):
+#         """
+#         Store references to parent tensors as weakrefs.
+#         """
+
+#         if not isinstance(parents, (list, tuple)):
+#             parents = (parents)
+#         self._parents = tuple(weakref.ref(p) for p in parents if p is not None)
+
+#     def item(self):
+#         if self.data.size != 1:
+#             raise ValueError("only one element tensors can be converted to a Python scalar")
+#         if "cuda" in self.device:
+#             return self.data.flatten()[0].get().item()
+#         else:
+#             return self.data.flatten()[0].item()
+
+#     def astype(self, dtype):
+
+#         ### Update the Tensors Dtype using setter ###
+#         self.data = self._data.astype(dtype)
+
+#         return self
+        
+#     def contiguous(self):
+#         self.data = self.xp.ascontiguousarray(self.data._array, dtype=self.data.dtype)
+#         return self
+    
+#     def detach(self):
+
+#         detached = Tensor(
+#             self.data,  
+#             requires_grad=False,
+#             grad_fn=None,
+#             grad_fn_name=None,
+#             device=self.device
+#         )
+
+#         return detached
+
+
+# import numpy as np
+# import weakref
+# from contextlib import contextmanager
+# import warnings
+# from . import _array as ap
+# from .dtypes import *
+
+# @contextmanager
+# def no_grad():
+#     old_state = Tensor._build_graph
+#     Tensor._build_graph = False
+#     try:
+#         # Yield is where we get the 'with' statement to execute
+#         yield
+#     finally:
+#         # Finally ensures that no matter what the original _build_graph is restored
+#         Tensor._build_graph = old_state
+
+# class Tensor:
+    
+#     _build_graph = True
+
+#     def __init__(self, 
+#                  data, 
+#                  requires_grad=False,
+#                  grad_fn=None, 
+#                  grad_fn_name=None,
+#                  device=None,
+#                  dtype=None):
+        
+#         ### If our data is not an Array type, convert it ###
+#         ### Array handles everything regarding our basic ops ###
+#         ### device, dtype, and anything else numpy would do ###
+#         self._data = ap.Array(data=data, 
+#                               device=device, 
+#                               dtype=dtype)
+        
+#         ### Set Autograd Variables ### 
+#         self.requires_grad = requires_grad
+#         self.grad_fn = grad_fn
+#         self.grad_fn_name = grad_fn_name
+#         self.grad = None
+#         self._is_leaf = self.requires_grad and (self.grad_fn is None)
+#         self._parents = ()
+#         self._version = 0
+
+#     @property
+#     def xp(self):
+#         return self._data.xp
+
+#     @property
+#     def data(self):
+#         """
+#         simple (view) access to data
+#         """
+#         return self._data
+    
+#     @property
+#     def dtype(self):
+#         return self._data.dtype
+    
+#     @property
+#     def device(self):
+#         return self._data.device
+    
+#     @data.setter
+#     def data(self, value):
+#         self._data = ap.Array(value)
+#         return self
+    
+#     @property
+#     def shape(self):
+#         return self._data.shape
+    
+#     @property
+#     def is_leaf(self):
+#         return self._is_leaf
+    
+#     def __repr__(self):
+#         """
+#         Pretty printing
+#         """
+
+#         ### Access underlying _array for printing only ! ###
+#         data = self.data._array
+
+#         # Convert array to string
+#         data_str = self.xp.array2string(
+#             data,
+#             separator=" ",
+#             precision=5,
+#             floatmode="fixed",
+#             max_line_width=80
+#         )
+
+#         # Indent all lines after the first like PyTorch
+#         lines = data_str.split("\n")
+#         if len(lines) > 1:
+#             indent = " " * len("tensor(")
+#             data_str = lines[0] + "\n" + "\n".join(indent + line for line in lines[1:])
+
+#         # Grad / requires_grad info
+#         grad_info = ""
+#         if getattr(self, "requires_grad", False):
+#             if getattr(self, "grad_fn", None) is not None:
+#                 grad_info = f", grad_fn={getattr(self, 'grad_fn_name', None)}"
+#             else:
+#                 grad_info = ", requires_grad=True"
+
+#         # Device info
+#         device_info = ""
+#         if "cuda" in self.device:
+#             device_info = f", device={self.device}"
+
+#         # Final string
+#         return f"tensor({data_str}{grad_info}{device_info})"
+    
+#     def to(self, device):
+#         ### use the setter of our data attribute to replace our ###
+#         ### existing self.data with the new one on the new device ###
+#         self.data = self.data.to(device)
+#         return self
+
+#     @classmethod
+#     def build_graph_enabled(cls):
+#         return cls._build_graph
+    
+#     @staticmethod
+#     def _check_broadcast(a, b):
+
+#         ## Verify that two numpy arrays are broadcastable ###
+#         ## This means a and b have the same number of dimensions ###
+#         ## I.E (1x3) + (1x1) summation is broadcasting
+
+#         ### We only really care about this when both a and b requires gradients ###
+#         ### as if they dont, then either a or b are just some constant ###
+
+#         ## Numpy technically supports broadcasting even when the dimensionality ###
+#         ## is not the same (1 x 3) + (1, ) but we wont for simplicity! ###
+#         if (len(a.shape) != len(b.shape)) and (a.requires_grad and b.requires_grad):
+#             raise ValueError(f"Incompatible Operation between {a.shape} and {b.shape}")
+
+#     def _broadcasted_grad_accumulate(self, x_shape, x_grad):
+
+#         grad_shape = x_grad.shape
+
+#         assert len(x_shape) == len(grad_shape), "Gradient and tensor shapes must be the same length! Only different by broadcasting"
+
+#         sum_axes = [idx for idx, (x_dim, grad_dim) in enumerate(zip(x_shape, grad_shape)) if x_dim == 1 and grad_dim != 1]
+#         if sum_axes:
+#             x_grad = np.sum(x_grad, axis=tuple(sum_axes), keepdims=True)
+
+#         return x_grad
+    
+#     def retain_grad(self):
+        
+#         if not self._warn_retaingrad:
+#             warnings.warn(
+#                 "You are retaining graph, intermediate gradients may not be cleared!!"
+#             )
+#         ### Leaf Tensors always retain grad ###
+#         if self.is_leaf:
+#             return 
+
+#         self._retain_grad = True
+
+#     def backward(self, grad=None):
+        
+#         # Initialize output gradient
+#         if grad is None:
+#             # print(self.data)
+#             grad = ap.Array.ones_like(self.data, dtype=self.dtype, device=self.device)
+
+#         self.grad = grad
+ 
+#         # Build topo-order
+#         visited = set()
+#         topo_order = []
+
+#         def build_topo(t):
+#             if id(t) in visited:
+#                 return
+#             visited.add(id(t))
+#             parents = getattr(t, "_parents", ())
+#             if parents is None:
+#                 parents = []
+#             for parent_ref in parents:
+#                 parent = parent_ref()
+#                 if parent is not None:
+#                     build_topo(parent)
+#             topo_order.append(t)
+
+#         build_topo(self)
+
+#         # Iterate in reverse topological order
+#         for t in reversed(topo_order):
+#             if t.grad_fn is not None:
+#                 t.grad_fn(t.grad)  # accumulate into parents
+                
+#                 ### Drop references immediately ###
+#                 if not getattr(t, "_retain_grad", False):
+#                     # Clear backward references so they can be GC'ed
+#                     t.grad_fn = None
+#                     t._parents = None
+
+#             if not t.is_leaf:
+#                 t.grad = None
+  
+#     def __add__(self, val):
+
+#         """
+#         Sum of two tensors (with accumulation for brodcasting)
+#         O = A + B
+#         dO/dA = 1
+#         dO/dB = 1
+#         """
+
+#         ### If Val is a Tensor, Then Check Devices ###
+#         if isinstance(val, Tensor): 
+
+#             ### Check Broadcast Shape ###
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+
+#         ### If we are just summing with an scalar ###
+#         ### Just cast to our dtype without any issues ###
+#         else:
+#             val_data = ap.Array(val, dtype=self.dtype, device=self.device)
+#             val_requires_grad = False
+#             val_shape = None
+        
+#         ### Use standard __add__ to actually add tensors together ###
+#         output = ap.Array.empty_like(self.data)
+#         np.add(self.data, val_data, out=output)
+        
+#         ### Define Backward Function ###
+#         def _add_backward(input_grad):
+
+#             if self.requires_grad:
+#                 self_grad = self._broadcasted_grad_accumulate(self.shape, input_grad)
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+                
+#                 self_grad = None
+
+#             if val_requires_grad:
+#                 val_grad = self._broadcasted_grad_accumulate(val_shape, input_grad)
+#                 if val.grad is None:
+#                     val.grad = val_grad
+#                 else:
+#                     val.grad += val_grad
+
+#                 val_grad = None
+
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         output = Tensor(output,
+#                         requires_grad=requires_grad,
+#                         grad_fn=_add_backward if requires_grad else None,
+#                         grad_fn_name="<AddBackward>" if requires_grad else None,
+#                         device=self.device)
+
+#         ### Set Parents ###
+#         if requires_grad:
+#             output._add_parents(self, val if isinstance(val, Tensor) else None)
+
+#         return output
+
+#     def __radd__(self, val):
+
+#         """
+#         add is not an ordered operation, A + B is the same as B + A
+
+#         In A + B, our self is A and val is B
+#         When we do A + B, what is really happening is A.__add__(B). 
+
+#         But if A is an integer and B is a Tensor, python integers dont know how to work with our
+#         own tensor operations. This will throw an error and then try __radd__.  
+    
+#         __radd__ will reverse the operands and do B.__add__(A), using our own Tensor __add__ written above instead.  
+#         Our __add__ we wrote for the tensor does know how to interface python numbers and tensors so we can then do the operation!
+
+#         """
+#         return self + val
+    
+#     def __iadd__(self, val):
+#         """
+#         Inplace operation to enable self += val
+#             - prevent inplace operation on leaf tensors that require grad
+#             - tracks version for non-leaf tensors to see if there is a mismatch
+        
+#         The problem is, leaf tensors for us are typically our parameters. So we typically only
+#         want to change them through our gradient updates. On the other hand, if I manually change
+#         them in place, i dont really know what to do with that. PyTorch for this reason just simplifies
+#         it and throws an error any time we are tracking gradients on a leaf tensor and apply some inplace op. 
+
+#         On the other hand, on non-leaf tensors (created through performing ops on our leaf tensors) it is 
+#         still fine for the most part but with a condition. During our forward propagation, the metadata from
+#         that graph is stored for backprop. Now if I manually change something in the graph inplace, 
+#         that graph is no longer storing the correct information and backprop wont be accurate anymore. 
+
+#         Thus pytorch employs a versioning index, and every inplace op increments the version. If there 
+#         is a mismatch during backprop between the version that was on the graph and the version thats 
+#         currently there (indicating some inplace op happened after graph creation), then we raise and error. 
+        
+#         Technically, we should just never do inplace ops, because what are you really saving?? 
+        
+#         a+=b vs a = a + b... 
+
+#         wow...
+
+#         Either way lets implement it to still have something close to torch!
+#         """
+
+#         if self.requires_grad and self.is_leaf:
+#             raise RuntimeError("A leaf Tensor that requires grad is being used in an in-place operation")
+        
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+#         else:
+#             val_data = ap.Array(val, dtype=self.dtype, device=self.device)
+#             val_requires_grad = False
+#             val_shape = None
+        
+#         ### Capture current version of the tensor ###
+#         saved_version = getattr(self, "_version", 0)
+
+#         ### Capture the old grad function to use ###
+#         old_self_grad_fn = getattr(self, "grad_fn", None)
+#         old_val_grad_fn = getattr(val, "grad_fn", None)
+
+#         ### inplace op ###
+#         self.data += val_data
+
+#         ### increment version (default 0 if it doesn't exist but it should always) ###
+#         self._version = getattr(self, "_version", 0) + 1
+        
+#         ### Handle Backward with versioning ###
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         if requires_grad:
+#             def _iadd_backward(input_grad):
+#                 # Version check on leaf tensors where we really care ###
+#                 if self.is_leaf and self._version != saved_version + 1:
+#                     raise RuntimeError(
+#                         "one of the variables needed for gradient computation "
+#                         "has been modified by an in-place operation"
+#                     )
+
+#                 ### If we arent a leaf tensor we just use our original grad fn ###
+#                 if self.requires_grad:
+#                     grad_self = self._broadcasted_grad_accumulate(self.shape, input_grad)
+                    
+#                     ### If a leaf tensor just accumulate grads like normal ###
+#                     if self.is_leaf or getattr(self, "_retrain_grad", False):
+#                         if self.grad is None:
+#                             self.grad = grad_self
+#                         else:
+#                             self.grad += grad_self
+
+#                     ### If not a leaf tensor, just use the old grad function ###
+#                     elif not self.is_leaf and old_self_grad_fn is not None:
+#                         old_self_grad_fn(grad_self)
+                    
+#                 if val_requires_grad:
+    
+#                     grad_val = val._broadcasted_grad_accumulate(val_shape, input_grad)
+#                     if val.is_leaf or getattr(val, "_retrain_grad", False):
+#                         if val.grad is None:
+#                             val.grad = grad_val
+#                         else:
+#                             val.grad += grad_val
+                        
+#                     elif not self.is_leaf and old_val_grad_fn is not None:
+#                         old_val_grad_fn(grad_val)
+
+#             self.grad_fn = _iadd_backward
+#             self.grad_fn_name = "<IAddBackward>"
+
+#         return self
+
+#     def __sub__(self, val):
+
+#         """
+#         Same as __add__ but now subtraction (with accumulation for broadcasting)
+#         O = A - B
+#         dO/dA = 1
+#         dO/dB = -1
+#         """
+
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+
+#         else:
+#             val_data = ap.Array(val, dtype=self.dtype, device=self.device)
+#             val_requires_grad = False
+#             val_shape = None
+
+#         output = np.empty_like(self.data)
+#         np.subtract(self.data, val_data, out=output)
+        
+#         ### Define Backward Function ###
+#         def _sub_backward(input_grad):
+#             if self.requires_grad:
+#                 # self_grad = input_grad
+#                 self_grad = self._broadcasted_grad_accumulate(self.shape, input_grad)
+                
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#             if val_requires_grad:
+#                 # val_grad = -input_grad
+#                 val_grad = self._broadcasted_grad_accumulate(val_shape, -input_grad)
+                
+#                 if val.grad is None:
+#                     val.grad = val_grad
+#                 else:
+#                     val.grad += val_grad
+
+#                 val_grad = None
+
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         output = Tensor(output,
+#                         requires_grad=requires_grad,
+#                         grad_fn=_sub_backward if requires_grad else None,
+#                         grad_fn_name="<SubBackward>" if requires_grad else None,
+#                         device=self.device)
+        
+#         if requires_grad:
+#             output._add_parents(self, val if isinstance(val, Tensor) else None)
+        
+#         return output
+    
+#     def __rsub__(self, val):
+
+#         """
+#         Subtraction is an ordered operation. Lets say we want A - B where A is self and B is val
+#         if A is not a tensor (i.e. an int or float), __sub__ will throw an error as it doesnt know
+#         how to do an operation with our own tensor.
+
+#         This will enter __rsub__ where we flip the operands where B is now self and A is val. If we want
+#         A - B, we need to do -1 * B + A, using our __add__. 
+
+#         There are a bunch of ways to handle these exceptions, this is just one of them!
+#         """
+
+#         return -1 * self + val
+
+#     def __isub__(self, val):
+#         """
+#         Inplace op to enable self -= val
+#         """
+
+#         if self.requires_grad and self.is_leaf:
+#             raise RuntimeError("A leaf Tensor that requires grad is being used in an in-place operation")
+        
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+#         else:
+#             val_data = ap.Array(val, dtype=self.dtype, device=self.device)
+#             val_requires_grad = False
+#             val_shape = None
+        
+#         ### Capture current version of the tensor ###
+#         saved_version = getattr(self, "_version", 0)
+
+#         ### Capture the old grad function to use ###
+#         old_grad_fn = getattr(self, "grad_fn", None)
+
+#         ### inplace op ###
+#         self.data -= val_data
+
+#         ### increment version (default 0 if it doesn't exist) ###
+#         self._version = getattr(self, "_version", 0) + 1
+
+#         ### Handle Backward with versioning ###
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         if requires_grad:
+#             def _isub_backward(input_grad):
+#                 # Version check
+#                 if self.is_leaf and self._version != saved_version + 1:
+#                     raise RuntimeError(
+#                         "one of the variables needed for gradient computation "
+#                         "has been modified by an in-place operation"
+#                     )
+
+#                 if self.requires_grad:
+#                     grad_self = self._broadcasted_grad_accumulate(self.shape, input_grad)
+                    
+#                     ### If a leaf tensor just accumulate grads like normal ###
+#                     if self.is_leaf:
+#                         if self.grad is None:
+#                             self.grad = grad_self
+#                         else:
+#                             self.grad += grad_self
+
+#                     ### If not a leaf tensor, just use the old grad function ###
+#                     else:
+#                         old_grad_fn(grad_self)
+                    
+#                 if val_requires_grad:
+#                     grad_val = val._broadcasted_grad_accumulate(val_shape, -input_grad)
+#                     if val.is_leaf:
+#                         if val.grad is None:
+#                             val.grad = grad_val
+#                         else:
+#                             val.grad += grad_val
+#                     else:
+#                         val.grad_fn(grad_val)
+
+#             self.grad_fn = _isub_backward
+#             self.grad_fn_name = "<ISubBackward>"
+
+#         return self
+
+#     def __mul__(self, val):
+
+#         """
+#         Element-wise multiplication of two tensors (with accumulation for broadcasting)
+
+#         O = A * B
+#         dO/dA = B
+#         do/dB = A
+#         """
+
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+
+#         else:
+#             val_data = ap.Array(val, dtype=self.dtype, device=self.device)
+#             val_requires_grad = False
+#             val_shape = None
+            
+#         output = np.empty_like(self.data)
+#         np.multiply(self.data, val_data, out=output)
+
+#         def _mul_backward(input_grad):
+
+#             if self.requires_grad:
+#                 self_grad = np.empty_like(input_grad)
+#                 np.multiply(input_grad, val_data, out=self_grad)
+#                 self_grad = self._broadcasted_grad_accumulate(self.shape, self_grad)
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+                
+#                 self_grad = None
+
+#             if val_requires_grad:
+#                 val_grad = np.empty_like(input_grad)
+#                 np.multiply(input_grad, self.data, out=val_grad)
+#                 val_grad = self._broadcasted_grad_accumulate(val_shape, val_grad)
+#                 if val.grad is None:
+#                     val.grad = val_grad
+#                 else:
+#                     val.grad += val_grad
+
+#                 val_grad = None
+
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         output = Tensor(output, 
+#                         requires_grad=requires_grad, 
+#                         grad_fn=_mul_backward if requires_grad else None,
+#                         grad_fn_name="<MulBackward>" if requires_grad else None,
+#                         device=self.device)
+        
+#         if requires_grad:
+#             output._add_parents(self, val if isinstance(val, Tensor) else None)
+
+#         return output
+    
+#     def __rmul__(self, val):
+#         return self * val
+
+#     def __imul__(self, val):
+#         """
+#         Inplace op to enable self *= val
+#         """
+
+#         if self.requires_grad and self.is_leaf:
+#             raise RuntimeError("A leaf Tensor that requires grad is being used in an in-place operation")
+        
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+#         else:
+#             val_data = ap.Array(val, dtype=self.dtype, device=self.device)
+#             val_requires_grad = False
+#             val_shape = None
+        
+#         ### Capture current version of the tensor ###
+#         saved_version = getattr(self, "_version", 0)
+
+#         ### Capture the old grad function to use ###
+#         old_grad_fn = getattr(self, "grad_fn", None)
+
+#         ### inplace op ###
+#         self.data *= val_data
+
+#         ### increment version (default 0 if it doesn't exist) ###
+#         self._version = getattr(self, "_version", 0) + 1
+
+#         ### Handle Backward with versioning ###
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         if requires_grad:
+#             def _imul_backward(input_grad):
+#                 # Only check version for leaf tensors
+#                 if self.is_leaf and self._version != saved_version + 1:
+#                     raise RuntimeError(
+#                         "one of the variables needed for gradient computation "
+#                         "has been modified by an in-place operation"
+#                     )
+
+#                 # Gradient w.r.t. self
+#                 if self.requires_grad:
+#                     grad_self = input_grad * val_data
+#                     grad_self = self._broadcasted_grad_accumulate(self.shape, grad_self)
+
+#                     if self.is_leaf:
+#                         if self.grad is None:
+#                             self.grad = grad_self
+#                         else:
+#                             self.grad += grad_self
+#                     else:
+#                         if old_grad_fn is not None:
+#                             old_grad_fn(grad_self)
+
+#                 # Gradient w.r.t. val
+#                 if val_requires_grad:
+#                     grad_val = input_grad * self.data
+#                     grad_val = val._broadcasted_grad_accumulate(val_shape, grad_val)
+
+#                     if val.is_leaf:
+#                         if val.grad is None:
+#                             val.grad = grad_val
+#                         else:
+#                             val.grad += grad_val
+#                     else:
+#                         if val.grad_fn is not None:
+#                             val.grad_fn(grad_val)
+
+#             self.grad_fn = _imul_backward
+#             self.grad_fn_name = "<IMulBackward>"
+
+#         return self
+
+#     def __neg__(self):
+#         return self * -1
+
+#     def __matmul__(self, val):
+
+#         ### Preallocate Memory for MatMul ###
+#         non_matmul_shapes = self.shape[:-2]
+#         output_shape = (*non_matmul_shapes, self.data.shape[-2], val.data.shape[-1])
+#         prealloc = self.xp.empty(output_shape, dtype=self.dtype)
+
+#         ### Compute MatMul ###
+#         output_data = self.xp.matmul(self.data, val.data, out=prealloc)
+
+#         def _matmul_backward(input_grad):
+
+#             if self.requires_grad:
+#                 prealloc_grad_self = self.xp.empty(shape=self.shape, dtype=self.data.dtype)
+#                 grad_self = self.xp.matmul(input_grad, val.data.swapaxes(-1, -2), out=prealloc_grad_self)
+                
+#                 if self.grad is None:
+#                     self.grad = grad_self
+#                 else:
+#                     self.grad += grad_self
+
+#                 grad_self = None
+
+#             if val.requires_grad:
+#                 prealloc_grad_val = self.xp.empty(shape=val.shape, dtype=self.data.dtype)
+#                 grad_val = self.xp.matmul(self.data.swapaxes(-1, -2), input_grad, out=prealloc_grad_val)
+                
+#                 if val.grad is None:
+#                     val.grad = grad_val
+#                 else:
+#                     val.grad += grad_val
+                
+#                 grad_val = None
+
+#         requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             output_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_matmul_backward if requires_grad else None,
+#             grad_fn_name="<MatmulBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self, val)
+
+#         return out
+
+#     def __truediv__(self, val):
+
+#         """
+#         Element-wise Division of two tensors (accumulated grad for broadcasting)
+
+#         O = A/B
+#         dO/dA = 1/B
+#         dO/dB = -A/B^2
+
+#         """
+
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+
+#         else:
+#             val_data = ap.Array(val, dtype=self.dtype, device=self.device)
+#             val_requires_grad = False
+#             val_shape = None
+
+#         output = self.data / val_data
+
+#         def _div_backward(input_grad):
+#             if self.requires_grad:
+#                 self_grad = input_grad / val_data
+#                 self_grad = self._broadcasted_grad_accumulate(self.shape, self_grad)
+                
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+                
+#                 self_grad = None
+
+#             if val_requires_grad:
+#                 val_grad = input_grad * -1 * self.data / (val_data**2)
+#                 val_grad = self._broadcasted_grad_accumulate(val_shape, val_grad)
+                
+#                 if val.grad is None:
+#                     val.grad = val_grad
+#                 else:
+#                     val.grad += val_grad
+                
+#                 val_grad = None
+        
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         output = Tensor(output,
+#                         requires_grad=requires_grad,
+#                         grad_fn=_div_backward if requires_grad else None,
+#                         grad_fn_name="<DivBackward>" if requires_grad else None,
+#                         device=self.device
+#                     )
+
+#         if requires_grad:
+#             output._add_parents(self, val if isinstance(val, Tensor) else None)
+
+#         return output
+
+#     def __rtruediv__(self, val):
+        
+#         """
+#         Div is an ordered operation. Lets say we want A/B, in the case of __div__ A is self and B is val. 
+#         if A is not a Tensor (i.e. an int or float), A / B will throw an error beacuse we only can divide a tensor by a tensor
+#         In this case, __rtruediv__ will be called where A is now val and B is self (the operands have been flipped)
+#         We can then convert A (our non-tensor) which is in val to a tensor and then perform val / self to call __div__ again where
+#         A and B are both now tensors
+#         """
+#         ### if val is not a tensor alredy, we will add as a constant without gradients ###
+#         if not isinstance(val, Tensor): 
+#             val = Tensor(val, dtype=self.dtype)
+#         return val / self
+
+#     def __itruediv__(self, val):
+#         """
+#         Inplace op to enable self /= val
+#         """
+
+#         if self.requires_grad and self.is_leaf:
+#             raise RuntimeError("A leaf Tensor that requires grad is being used in an in-place operation")
+        
+#         if isinstance(val, Tensor): 
+#             self._check_broadcast(self, val)
+
+#             val_data = val.data
+#             val_requires_grad = val.requires_grad
+#             val_shape = val.shape
+#         else:
+#             val_data = ap.Array(val, dtype=self.dtype, device=self.device)
+#             val_requires_grad = False
+#             val_shape = None
+        
+#         ### Capture current version of the tensor ###
+#         saved_version = getattr(self, "_version", 0)
+
+#         ### Capture the old grad function to use ###
+#         old_grad_fn = getattr(self, "grad_fn", None)
+
+#         ### inplace op ###
+#         self.data /= val_data
+
+#         ### increment version (default 0 if it doesn't exist) ###
+#         self._version = getattr(self, "_version", 0) + 1
+
+#         ### Handle Backward with versioning ###
+#         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
+#         if requires_grad:
+#             # Gradient w.r.t. self
+#             def _idiv_backward(input_grad):
+#                 # Only check version for leaf tensors
+#                 if self.is_leaf and self._version != saved_version + 1:
+#                     raise RuntimeError(
+#                         "one of the variables needed for gradient computation "
+#                         "has been modified by an in-place operation"
+#                     )
+
+#                 # Gradient w.r.t. self
+#                 if self.requires_grad:
+#                     grad_self = input_grad / val_data
+#                     grad_self = self._broadcasted_grad_accumulate(self.shape, grad_self)
+
+#                     if self.is_leaf:
+#                         if self.grad is None:
+#                             self.grad = grad_self
+#                         else:
+#                             self.grad += grad_self
+#                     else:
+#                         if old_grad_fn is not None:
+#                             old_grad_fn(grad_self)
+
+#                 # Gradient w.r.t. val
+#                 if val_requires_grad:
+#                     grad_val = input_grad * (-self.data / (val_data**2))
+#                     grad_val = val._broadcasted_grad_accumulate(val_shape, grad_val)
+
+#                     if val.is_leaf:
+#                         if val.grad is None:
+#                             val.grad = grad_val
+#                         else:
+#                             val.grad += grad_val
+#                     else:
+#                         if val.grad_fn is not None:
+#                             val.grad_fn(grad_val)
+
+#             self.grad_fn = _idiv_backward
+#             self.grad_fn_name = "<IDivBackward>"
+
+#         return self
+
+#     def __pow__(self, exponent):
+
+#         """
+#         Element-wise exponentiation of matrix (assuming exponent is non-learnable for simplicity)
+#         O = A^K
+#         dO/dA = K * A^(k-1)
+#         """
+
+#         output = self.data ** exponent
+    
+#         def _pow_backward(input_grad):
+#             self_grad = input_grad * (exponent * self.data ** (exponent-1))
+            
+#             if self.grad is None:
+#                 self.grad = self_grad
+#             else:
+#                 self.grad += self_grad
+
+#             self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         output = Tensor(output,
+#                         requires_grad=requires_grad,
+#                         grad_fn=_pow_backward if requires_grad else None,
+#                         grad_fn_name="<PowBackward>" if requires_grad else None,
+#                         device=self.device)
+        
+#         if requires_grad:
+#             output._add_parents(self)
+
+#         return output
+    
+#     def __getitem__(self, idx):
+#         """
+#         Supports slices, ints, arrays, and tuple-of-arrays indexing.
+#         """
+        
+#         # Convert Tensor indices to cp arrays
+#         if isinstance(idx, Tensor):
+#             idx = idx.data
+
+#         if isinstance(idx, (list, tuple)):
+#             idx = tuple(
+#                 (i.data.astype(self.xp.int64) if isinstance(i, Tensor) else self.xp.array(i, dtype=self.xp.int64))
+#                 if isinstance(i, (list, Tensor)) else i
+#                 for i in idx
+#             )
+
+#         out_data = self.data[idx]
+
+#         def _index_backward(input_grad):
+
+#             if self.requires_grad:
+#                 if self.grad is None:
+#                     self.grad = self.xp.zeros_like(self.data, dtype=self.data.dtype)
+
+#                 # Convert index to raw array if needed
+#                 actual_idx = idx
+#                 if isinstance(idx, Tensor):
+#                     actual_idx = idx.data
+#                 if isinstance(actual_idx, ap.Array):
+#                     actual_idx = actual_idx._array
+
+#                 # Elementwise assignment for fancy indexing
+#                 self.xp.add.at(self.grad, actual_idx, input_grad)
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(out_data,
+#                     requires_grad=requires_grad,
+#                     grad_fn=_index_backward if requires_grad else None,
+#                     grad_fn_name="<IndexBackward>" if requires_grad else None,
+#                     device=self.device)
+        
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def __eq__(self, other): # ==
+#         return Tensor(self.data == (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+
+#     def __ne__(self, other):  # !=
+#         return ~(self == other)
+
+#     def __lt__(self, other):  # <
+#         return Tensor(self.data < (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+
+#     def __le__(self, other):  # <=
+#         return Tensor(self.data <= (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+
+#     def __gt__(self, other):  # >
+#         return Tensor(self.data > (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+
+#     def __ge__(self, other):  # >=
+#         return Tensor(self.data >= (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+
+#     def __len__(self):
+#         return self.shape[0]
+    
+#     def transpose(self, dim1, dim2):
+#         """
+#         Swap two dimensions of the tensor.
+#         """
+#         out_data = self.data.swapaxes(dim1, dim2)
+ 
+#         def _transpose_backward(input_grad):
+#             # Just swap back the same two dims
+#             if self.requires_grad:
+#                 self_grad = input_grad.swapaxes(dim1, dim2)
+
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(out_data,
+#                     requires_grad=requires_grad,
+#                     grad_fn=_transpose_backward if requires_grad else None,
+#                     grad_fn_name="<TransposeBackward>" if requires_grad else None,
+#                     device=self.device)
+        
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def permute(self, *dims):
+#         """
+#         Permute tensor dimensions according to dims.
+#         Example: (0, 2, 1) will reorder axes in that order.
+#         """
+#         out_data = self.xp.transpose(self.data, axes=dims)
+
+#         def _permute_backward(input_grad):
+#             if self.requires_grad:
+#                 # Inverse permutation
+#                 inv_dims = self.xp.argsort(dims)
+#                 self_grad = self.xp.transpose(input_grad, axes=inv_dims)
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(out_data,
+#                     requires_grad=requires_grad,
+#                     grad_fn=_permute_backward if requires_grad else None,
+#                     grad_fn_name="<PermuteBackward>" if requires_grad else None,
+#                     device=self.device)
+        
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+
+#     def exp(self):
+#         """
+#         Element-wise exponentiation of the base e.
+#         O = e^A
+#         dO/dA = e^A
+#         """
+#         out_data = self.xp.exp(self.data)
+
+#         def _exp_backward(input_grad):
+#             if self.requires_grad:
+#                 self_grad = input_grad * out_data  # use forward output to save recomputation
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             out_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_exp_backward if requires_grad else None,
+#             grad_fn_name="<ExpBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def log(self):
+
+#         """
+#         Element-wise log with base e
+#         O = log(A)
+#         dO/dA = 1/a
+#         """
+
+#         output = self.xp.log(self.data)
+   
+#         def _log_backward(input_grad): 
+
+#             if self.requires_grad:
+#                 self_grad = input_grad * (1/self.data)
+
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+        
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         output = Tensor(output, 
+#                         requires_grad=requires_grad,
+#                         grad_fn=_log_backward if requires_grad else None, 
+#                         grad_fn_name="<LogBackward>" if requires_grad else None,
+#                         device=self.device)
+        
+#         if requires_grad:
+#             output._add_parents(self)
+
+#         return output
+
+#     def sum(self, dim=None, keepdims=False):
+#         """
+#         Sum across a dimension.
+#         Forward: output = self.data.sum(axis=dim, keepdims=keepdims)
+#         Backward: distribute incoming gradient to all elements along summed axes.
+#         """
+#         out_data = self.data.sum(axis=dim, keepdims=keepdims)
+
+#         def _sum_backward(input_grad):
+#             if self.requires_grad:
+#                 # Broadcast input gradient to input shape
+#                 self_grad = np.broadcast_to(input_grad, self.shape)
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             out_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_sum_backward if requires_grad else None,
+#             grad_fn_name="<SumBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def mean(self, dim=None, keepdims=False):
+#         """
+#         Mean across a dimension.
+#         Forward: output = self.data.mean(axis=dim, keepdims=keepdims)
+#         Backward: broadcast incoming gradient and divide by number of elements summed.
+#         """
+
+#         ### if no dim is provided we reduce on all dims ###
+#         if dim is None:
+#             dim = tuple(range(len(self.shape)))
+
+#         out_data = self.data.mean(axis=dim, keepdims=keepdims)
+
+#         def _mean_backward(input_grad):
+
+#             if self.requires_grad:
+#                 # Compute number of elements reduced over
+#                 dims = dim if isinstance(dim, tuple) else (dim,)
+#                 num_vals_averaged = np.prod([self.shape[d] for d in dims])
+
+#                 # Broadcast upstream gradient and scale
+#                 self_grad = self.xp.broadcast_to(input_grad, self.shape) / num_vals_averaged
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             out_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_mean_backward if requires_grad else None,
+#             grad_fn_name="<MeanBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def var(self, dim=None, keepdims=False):
+#         """
+#         Variance along a given dimension.
+#         Var = mean((x - mean(x))^2)
+        
+#         Backward: dVar/dx = 2 * (x - mean(x)) / N * input_grad
+#         """
+
+#         ### if no dim is provided we reduce on all dims ###
+#         if dim is None:
+#             dim = tuple(range(len(self.shape)))
+
+#         # Forward pass
+#         mean_vals = self.data.mean(axis=dim, keepdims=True)
+#         var_vals = ((self.data - mean_vals) ** 2).mean(axis=dim, keepdims=keepdims)
+
+#         def _var_backward(input_grad):
+#             if self.requires_grad:
+#                 # Broadcast input gradient to input shape
+#                 input_grad_broadcast = self.xp.broadcast_to(input_grad, self.shape)
+                
+#                 # Number of elements reduced over
+#                 dims = dim if isinstance(dim, tuple) else (dim,)
+#                 num_vals_reduced = np.prod([self.shape[d] for d in dims])
+                
+#                 # Gradient formula: 2/N * (x - mean(x)) * upstream gradient
+#                 centered = self.data - mean_vals
+#                 self_grad = 2.0 * centered * input_grad_broadcast / num_vals_reduced
+
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+                
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             var_vals,
+#             requires_grad=requires_grad,
+#             grad_fn=_var_backward if requires_grad else None,
+#             grad_fn_name="<VarBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+
+#     def max(self, dim=None, keepdims=False):
+#         """
+#         Compute max along axis with autograd support.
+#         Only propagate gradient to the positions where the maximum occurred.
+#         """
+
+#         ### if no dim is provided we reduce on all dims ###
+#         if dim is None:
+#             dim = tuple(range(len(self.shape)))
+            
+#         out_data = self.data.max(axis=dim, keepdims=keepdims)
+
+#         def _max_backward(input_grad):
+            
+#             if self.requires_grad:
+
+#                 grad = self.xp.zeros_like(self.data, dtype=self.data.dtype)
+
+#                 # Broadcast input_grad if needed
+#                 if dim is not None and not keepdims:
+#                     input_grad = self.xp.expand_dims(input_grad, dim)
+
+#                 # Broadcast to match self shape
+#                 input_grad = input_grad * self.xp.ones_like(self.data, dtype=self.data.dtype)
+                
+#                 # Only propagate gradient to positions where max occurred
+#                 mask = (self.data == (out_data if keepdims else self.xp.expand_dims(out_data, dim)))
+#                 grad += input_grad * mask
+    
+#                 # Call backward on self
+#                 if self.grad is None:
+#                     self.grad = grad
+#                 else:
+#                     self.grad += grad
+
+#                 grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             out_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_max_backward if requires_grad else None,
+#             grad_fn_name="<MaxBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def argmax(self, dim=-1):
+#         """
+#         Compute the indices of the maximum value along a dimension.
+#         Note: argmax is non-differentiable.
+#         """
+#         out_data = self.data.argmax(axis=dim)
+
+#         def _argmax_backward(input_grad):
+#             # No gradient flows through argmax
+#             return ap.Array.zeros_like(self.data, dtype=self.data.dtype)
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             out_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_argmax_backward if requires_grad else None,
+#             grad_fn_name="<ArgmaxBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+    
+#     def reshape(self, *shape):
+#         """
+#         Reshape the tensor. Gradients are reshaped back to the original shape during backprop.
+#         """
+#         out_data = self.data.reshape(*shape)
+
+#         def _reshape_backward(input_grad):
+#             if self.requires_grad:
+#                 self_grad = input_grad.reshape(self.data.shape)
+#                 if self.grad is None:
+#                     self.grad = self_grad
+#                 else:
+#                     self.grad += self_grad
+
+#                 self_grad = None
+
+#         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+#         out = Tensor(
+#             out_data,
+#             requires_grad=requires_grad,
+#             grad_fn=_reshape_backward if requires_grad else None,
+#             grad_fn_name="<ReshapeBackward>" if requires_grad else None,
+#             device=self.device
+#         )
+
+#         if requires_grad:
+#             out._add_parents(self)
+
+#         return out
+
+#     def _add_parents(self, *parents):
+#         """
+#         Store references to parent tensors as weakrefs.
+#         """
+
+#         if not isinstance(parents, (list, tuple)):
+#             parents = (parents)
+#         self._parents = tuple(weakref.ref(p) for p in parents if p is not None)
+
+#     def item(self):
+#         if self.data.size != 1:
+#             raise ValueError("only one element tensors can be converted to a Python scalar")
+#         if "cuda" in self.device:
+#             return self.data.flatten()[0].get().item()
+#         else:
+#             return self.data.flatten()[0].item()
+
+#     def astype(self, dtype):
+
+#         ### Update the Tensors Dtype using setter ###
+#         self.data = self._data.astype(dtype)
+
+#         return self
+        
+#     def contiguous(self):
+#         ### To map to contiguous we have to use the proper backend here ###
+#         self.data = self.xp.ascontiguousarray(self.data._array, dtype=self.data.dtype)
+#         return self
+    
+#     def detach(self):
+
+#         detached = Tensor(
+#             self.data,  
+#             requires_grad=False,
+#             grad_fn=None,
+#             grad_fn_name=None,
+#             device=self.device
+#         )
+
+#         return detached
+
 import numpy as np
-import cupy as cp
 import weakref
 from contextlib import contextmanager
 import warnings
-
-from .autograd.ops_registry import register_op
 from . import _array as ap
-
-##### QUICK ENABLE FOR TENSOR CORE OPS ###
-device = cp.cuda.Device()
-# string containing the major index and the minor index. 
-# For example, compute capability 3.5 is represented by the string ‘35’.
-cc_major, cc_minor = device.compute_capability 
-if int(cc_major) >= 8:
-    os.environ["CUPY_TF32"] = "1"
-##########################################
-    
-def cupy_prod(x, axis=None, dtype=None, keepdims=False):
-    """
-    Quick helper method as cp.prod(x) doesnt work if x is a list
-    unlike numpy that internally converts to numpy array before 
-    doing the prod
-    """
-    if not isinstance(x, cp.ndarray):
-        x = cp.array(x)
-    return cp.prod(x, axis=axis, dtype=dtype, keepdims=keepdims).astype(x.dtype)
+from .dtypes import *
 
 @contextmanager
 def no_grad():
@@ -64,6 +2807,7 @@ class Tensor:
         self.grad = None
         self._is_leaf = self.requires_grad and (self.grad_fn is None)
         self._parents = ()
+        self._version = 0
 
     @property
     def xp(self):
@@ -160,25 +2904,6 @@ class Tensor:
         ## is not the same (1 x 3) + (1, ) but we wont for simplicity! ###
         if (len(a.shape) != len(b.shape)) and (a.requires_grad and b.requires_grad):
             raise ValueError(f"Incompatible Operation between {a.shape} and {b.shape}")
-    
-    @staticmethod
-    def _check_device(*tensors):
-        ### Device check ###
-        devices = {t.device for t in tensors if t is not None}
-        if len(devices) > 1:
-            raise RuntimeError(
-                f"Expected all tensors to be on the same device, "
-                f"but found devices: {', '.join(map(str, devices))}"
-            )
-    
-    @staticmethod
-    def _check_dtypes(*tensors):
-        dtypes = {t.dtype for t in tensors if t is not None}
-        if len(dtypes) > 1:
-            warnings.warn(
-                f"Tensor dtype mismatch: found {', '.join(map(str, dtypes))}. "
-                f"This can lead to higher than expected memory usage."
-            )
 
     def _broadcasted_grad_accumulate(self, x_shape, x_grad):
 
@@ -188,7 +2913,7 @@ class Tensor:
 
         sum_axes = [idx for idx, (x_dim, grad_dim) in enumerate(zip(x_shape, grad_shape)) if x_dim == 1 and grad_dim != 1]
         if sum_axes:
-            x_grad = self.xp.sum(x_grad, axis=tuple(sum_axes), keepdims=True)
+            x_grad = np.sum(x_grad, axis=tuple(sum_axes), keepdims=True)
 
         return x_grad
     
@@ -208,7 +2933,8 @@ class Tensor:
         
         # Initialize output gradient
         if grad is None:
-            grad = self.xp.ones_like(self.data, dtype=self.data.dtype)
+            grad = ap.Array.ones_like(self.data, dtype=self.dtype, device=self.device)
+
         self.grad = grad
  
         # Build topo-order
@@ -234,7 +2960,7 @@ class Tensor:
         for t in reversed(topo_order):
             if t.grad_fn is not None:
                 t.grad_fn(t.grad)  # accumulate into parents
-
+                
                 ### Drop references immediately ###
                 if not getattr(t, "_retain_grad", False):
                     # Clear backward references so they can be GC'ed
@@ -255,12 +2981,6 @@ class Tensor:
 
         ### If Val is a Tensor, Then Check Devices ###
         if isinstance(val, Tensor): 
-  
-            ### Check Op is on Same Device
-            self._check_device(self, val)
-            
-            ### Check Dtypes ###
-            self._check_dtypes(self, val)
 
             ### Check Broadcast Shape ###
             self._check_broadcast(self, val)
@@ -272,33 +2992,33 @@ class Tensor:
         ### If we are just summing with an scalar ###
         ### Just cast to our dtype without any issues ###
         else:
-            val_data = self.xp.array(val, dtype=self.dtype)
+            val_data = ap.Array(val, dtype=self.dtype, device=self.device)
             val_requires_grad = False
             val_shape = None
         
         ### Use standard __add__ to actually add tensors together ###
-        output = self.data + val_data
+        output = np.add(self.data, val_data)
         
         ### Define Backward Function ###
         def _add_backward(input_grad):
 
             if self.requires_grad:
-                # self_grad = input_grad
                 self_grad = self._broadcasted_grad_accumulate(self.shape, input_grad)
-
                 if self.grad is None:
                     self.grad = self_grad
                 else:
                     self.grad += self_grad
+                
+                self_grad = None
 
             if val_requires_grad:
-                # val_grad = input_grad
                 val_grad = self._broadcasted_grad_accumulate(val_shape, input_grad)
-                
                 if val.grad is None:
                     val.grad = val_grad
                 else:
                     val.grad += val_grad
+
+                val_grad = None
 
         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
         output = Tensor(output,
@@ -363,15 +3083,13 @@ class Tensor:
             raise RuntimeError("A leaf Tensor that requires grad is being used in an in-place operation")
         
         if isinstance(val, Tensor): 
-            self._check_device(self, val)
-            self._check_dtypes(self, val)
             self._check_broadcast(self, val)
 
             val_data = val.data
             val_requires_grad = val.requires_grad
             val_shape = val.shape
         else:
-            val_data = self.xp.array(val, dtype=self.dtype)
+            val_data = ap.Array(val, dtype=self.dtype, device=self.device)
             val_requires_grad = False
             val_shape = None
         
@@ -441,8 +3159,6 @@ class Tensor:
         """
 
         if isinstance(val, Tensor): 
-            self._check_device(self, val)
-            self._check_dtypes(self, val)
             self._check_broadcast(self, val)
 
             val_data = val.data
@@ -450,11 +3166,11 @@ class Tensor:
             val_shape = val.shape
 
         else:
-            val_data = self.xp.array(val, dtype=self.dtype)
+            val_data = ap.Array(val, dtype=self.dtype, device=self.device)
             val_requires_grad = False
             val_shape = None
-       
-        output = self.data - val_data
+
+        output = np.subtract(self.data, val_data)
         
         ### Define Backward Function ###
         def _sub_backward(input_grad):
@@ -466,7 +3182,9 @@ class Tensor:
                     self.grad = self_grad
                 else:
                     self.grad += self_grad
-                
+
+                self_grad = None
+
             if val_requires_grad:
                 # val_grad = -input_grad
                 val_grad = self._broadcasted_grad_accumulate(val_shape, -input_grad)
@@ -475,6 +3193,8 @@ class Tensor:
                     val.grad = val_grad
                 else:
                     val.grad += val_grad
+
+                val_grad = None
 
         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
         output = Tensor(output,
@@ -512,15 +3232,13 @@ class Tensor:
             raise RuntimeError("A leaf Tensor that requires grad is being used in an in-place operation")
         
         if isinstance(val, Tensor): 
-            self._check_device(self, val)
-            self._check_dtypes(self, val)
             self._check_broadcast(self, val)
 
             val_data = val.data
             val_requires_grad = val.requires_grad
             val_shape = val.shape
         else:
-            val_data = self.xp.array(val, dtype=self.dtype)
+            val_data = ap.Array(val, dtype=self.dtype, device=self.device)
             val_requires_grad = False
             val_shape = None
         
@@ -587,8 +3305,6 @@ class Tensor:
         """
 
         if isinstance(val, Tensor): 
-            self._check_device(self, val)
-            self._check_dtypes(self, val)
             self._check_broadcast(self, val)
 
             val_data = val.data
@@ -596,30 +3312,33 @@ class Tensor:
             val_shape = val.shape
 
         else:
-            val_data = self.xp.array(val, dtype=self.dtype)
+            val_data = ap.Array(val, dtype=self.dtype, device=self.device)
             val_requires_grad = False
             val_shape = None
             
-        output = self.data * val_data
+        output = np.multiply(self.data, val_data)
 
         def _mul_backward(input_grad):
-    
+
             if self.requires_grad:
-                self_grad = input_grad * val_data
+                self_grad = np.multiply(input_grad, val_data)
                 self_grad = self._broadcasted_grad_accumulate(self.shape, self_grad)
                 if self.grad is None:
                     self.grad = self_grad
                 else:
                     self.grad += self_grad
-            
-            if val_requires_grad:
-                val_grad = input_grad * self.data
-                val_grad = self._broadcasted_grad_accumulate(val_shape, val_grad)
                 
+                self_grad = None
+
+            if val_requires_grad:
+                val_grad = np.multiply(input_grad, self.data)
+                val_grad = self._broadcasted_grad_accumulate(val_shape, val_grad)
                 if val.grad is None:
                     val.grad = val_grad
                 else:
                     val.grad += val_grad
+
+                val_grad = None
 
         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
         output = Tensor(output, 
@@ -645,15 +3364,13 @@ class Tensor:
             raise RuntimeError("A leaf Tensor that requires grad is being used in an in-place operation")
         
         if isinstance(val, Tensor): 
-            self._check_device(self, val)
-            self._check_dtypes(self, val)
             self._check_broadcast(self, val)
 
             val_data = val.data
             val_requires_grad = val.requires_grad
             val_shape = val.shape
         else:
-            val_data = self.xp.array(val, dtype=self.dtype)
+            val_data = ap.Array(val, dtype=self.dtype, device=self.device)
             val_requires_grad = False
             val_shape = None
         
@@ -714,44 +3431,38 @@ class Tensor:
         return self
 
     def __neg__(self):
-        return -1 * self
+        return self * -1
 
     def __matmul__(self, val):
-
-        if isinstance(val, Tensor): 
-            self._check_device(self, val)
-            self._check_dtypes(self, val)
-
-        else:
-            raise ValueError(f"Cannot MatMul between {type(self)} and {type(val)}")
 
         ### Preallocate Memory for MatMul ###
         non_matmul_shapes = self.shape[:-2]
         output_shape = (*non_matmul_shapes, self.data.shape[-2], val.data.shape[-1])
-        prealloc = self.xp.empty(output_shape, dtype=self.dtype)
 
         ### Compute MatMul ###
-        output_data = self.xp.matmul(self.data, val.data, out=prealloc)
+        output_data = np.matmul(self.data, val.data)
 
         def _matmul_backward(input_grad):
 
             if self.requires_grad:
-                prealloc_grad_self = self.xp.empty(shape=self.shape, dtype=self.data.dtype)
-                grad_self = self.xp.matmul(input_grad, val.data.swapaxes(-1, -2), out=prealloc_grad_self)
+                grad_self = np.matmul(input_grad, val.data.swapaxes(-1, -2))
                 
                 if self.grad is None:
                     self.grad = grad_self
                 else:
                     self.grad += grad_self
 
+                grad_self = None
+
             if val.requires_grad:
-                prealloc_grad_val = self.xp.empty(shape=val.shape, dtype=self.data.dtype)
-                grad_val = self.xp.matmul(self.data.swapaxes(-1, -2), input_grad, out=prealloc_grad_val)
+                grad_val = np.matmul(self.data.swapaxes(-1, -2), input_grad)
                 
                 if val.grad is None:
                     val.grad = grad_val
                 else:
                     val.grad += grad_val
+                
+                grad_val = None
 
         requires_grad = (self.requires_grad or val.requires_grad) and Tensor.build_graph_enabled()
         out = Tensor(
@@ -779,8 +3490,6 @@ class Tensor:
         """
 
         if isinstance(val, Tensor): 
-            self._check_device(self, val)
-            self._check_dtypes(self, val)
             self._check_broadcast(self, val)
 
             val_data = val.data
@@ -788,7 +3497,7 @@ class Tensor:
             val_shape = val.shape
 
         else:
-            val_data = self.xp.array(val, dtype=self.dtype)
+            val_data = ap.Array(val, dtype=self.dtype, device=self.device)
             val_requires_grad = False
             val_shape = None
 
@@ -803,6 +3512,8 @@ class Tensor:
                     self.grad = self_grad
                 else:
                     self.grad += self_grad
+                
+                self_grad = None
 
             if val_requires_grad:
                 val_grad = input_grad * -1 * self.data / (val_data**2)
@@ -812,6 +3523,8 @@ class Tensor:
                     val.grad = val_grad
                 else:
                     val.grad += val_grad
+                
+                val_grad = None
         
         requires_grad = (self.requires_grad or val_requires_grad) and Tensor.build_graph_enabled()
         output = Tensor(output,
@@ -849,15 +3562,13 @@ class Tensor:
             raise RuntimeError("A leaf Tensor that requires grad is being used in an in-place operation")
         
         if isinstance(val, Tensor): 
-            self._check_device(self, val)
-            self._check_dtypes(self, val)
             self._check_broadcast(self, val)
 
             val_data = val.data
             val_requires_grad = val.requires_grad
             val_shape = val.shape
         else:
-            val_data = self.xp.array(val, dtype=self.dtype)
+            val_data = ap.Array(val, dtype=self.dtype, device=self.device)
             val_requires_grad = False
             val_shape = None
         
@@ -936,6 +3647,8 @@ class Tensor:
             else:
                 self.grad += self_grad
 
+            self_grad = None
+
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(output,
                         requires_grad=requires_grad,
@@ -970,7 +3683,7 @@ class Tensor:
 
             if self.requires_grad:
                 if self.grad is None:
-                    self.grad = self.xp.zeros_like(self.data, dtype=self.data.dtype)
+                    self.grad = ap.Array.zeros_like(self.data, dtype=self.data.dtype)
 
                 # Convert index to raw array if needed
                 actual_idx = idx
@@ -980,7 +3693,7 @@ class Tensor:
                     actual_idx = actual_idx._array
 
                 # Elementwise assignment for fancy indexing
-                self.grad[actual_idx] += input_grad
+                self.xp.add.at(self.grad, actual_idx, input_grad)
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(out_data,
@@ -1031,6 +3744,8 @@ class Tensor:
                 else:
                     self.grad += self_grad
 
+                self_grad = None
+
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(out_data,
                     requires_grad=requires_grad,
@@ -1060,6 +3775,8 @@ class Tensor:
                 else:
                     self.grad += self_grad
 
+                self_grad = None
+
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(out_data,
                     requires_grad=requires_grad,
@@ -1067,6 +3784,36 @@ class Tensor:
                     grad_fn_name="<PermuteBackward>" if requires_grad else None,
                     device=self.device)
         
+        if requires_grad:
+            out._add_parents(self)
+
+        return out
+    
+    def reshape(self, *shape):
+        """
+        Reshape the tensor. Gradients are reshaped back to the original shape during backprop.
+        """
+        out_data = self.data.reshape(*shape)
+
+        def _reshape_backward(input_grad):
+            if self.requires_grad:
+                self_grad = input_grad.reshape(self.data.shape)
+                if self.grad is None:
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
+
+                self_grad = None
+
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+        out = Tensor(
+            out_data,
+            requires_grad=requires_grad,
+            grad_fn=_reshape_backward if requires_grad else None,
+            grad_fn_name="<ReshapeBackward>" if requires_grad else None,
+            device=self.device
+        )
+
         if requires_grad:
             out._add_parents(self)
 
@@ -1087,6 +3834,8 @@ class Tensor:
                     self.grad = self_grad
                 else:
                     self.grad += self_grad
+
+                self_grad = None
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -1121,6 +3870,8 @@ class Tensor:
                     self.grad = self_grad
                 else:
                     self.grad += self_grad
+
+                self_grad = None
         
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         output = Tensor(output, 
@@ -1145,11 +3896,13 @@ class Tensor:
         def _sum_backward(input_grad):
             if self.requires_grad:
                 # Broadcast input gradient to input shape
-                self_grad = self.xp.broadcast_to(input_grad, self.shape)
+                self_grad = np.broadcast_to(input_grad, self.shape)
                 if self.grad is None:
                     self.grad = self_grad
                 else:
                     self.grad += self_grad
+
+                self_grad = None
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -1183,7 +3936,7 @@ class Tensor:
             if self.requires_grad:
                 # Compute number of elements reduced over
                 dims = dim if isinstance(dim, tuple) else (dim,)
-                num_vals_averaged = cupy_prod([self.shape[d] for d in dims])
+                num_vals_averaged = np.prod([self.shape[d] for d in dims])
 
                 # Broadcast upstream gradient and scale
                 self_grad = self.xp.broadcast_to(input_grad, self.shape) / num_vals_averaged
@@ -1191,6 +3944,8 @@ class Tensor:
                     self.grad = self_grad
                 else:
                     self.grad += self_grad
+
+                self_grad = None
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -1229,7 +3984,7 @@ class Tensor:
                 
                 # Number of elements reduced over
                 dims = dim if isinstance(dim, tuple) else (dim,)
-                num_vals_reduced = cupy_prod([self.shape[d] for d in dims])
+                num_vals_reduced = np.prod([self.shape[d] for d in dims])
                 
                 # Gradient formula: 2/N * (x - mean(x)) * upstream gradient
                 centered = self.data - mean_vals
@@ -1239,6 +3994,8 @@ class Tensor:
                     self.grad = self_grad
                 else:
                     self.grad += self_grad
+                
+                self_grad = None
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -1289,6 +4046,8 @@ class Tensor:
                 else:
                     self.grad += grad
 
+                grad = None
+
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
             out_data,
@@ -1312,7 +4071,7 @@ class Tensor:
 
         def _argmax_backward(input_grad):
             # No gradient flows through argmax
-            return self.xp.zeros_like(self.data, dtype=self.data.dtype)
+            return ap.Array.zeros_like(self.data, dtype=self.data.dtype)
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -1320,34 +4079,6 @@ class Tensor:
             requires_grad=requires_grad,
             grad_fn=_argmax_backward if requires_grad else None,
             grad_fn_name="<ArgmaxBackward>" if requires_grad else None,
-            device=self.device
-        )
-
-        if requires_grad:
-            out._add_parents(self)
-
-        return out
-    
-    def reshape(self, *shape):
-        """
-        Reshape the tensor. Gradients are reshaped back to the original shape during backprop.
-        """
-        out_data = self.data.reshape(*shape)
-
-        def _reshape_backward(input_grad):
-            if self.requires_grad:
-                self_grad = input_grad.reshape(self.data.shape)
-                if self.grad is None:
-                    self.grad = self_grad
-                else:
-                    self.grad += self_grad
-
-        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
-        out = Tensor(
-            out_data,
-            requires_grad=requires_grad,
-            grad_fn=_reshape_backward if requires_grad else None,
-            grad_fn_name="<ReshapeBackward>" if requires_grad else None,
             device=self.device
         )
 
@@ -1381,6 +4112,7 @@ class Tensor:
         return self
         
     def contiguous(self):
+        ### To map to contiguous we have to use the proper backend here ###
         self.data = self.xp.ascontiguousarray(self.data._array, dtype=self.data.dtype)
         return self
     
@@ -1395,3 +4127,74 @@ class Tensor:
         )
 
         return detached
+
+
+##################################################################
+### TENSOR FACTORY ###############################################
+##################################################################                    
+### This is just a warpper on our Class methods in _array.py! ####
+##################################################################
+
+def _tensor_from_array(func, device="cpu", dtype=None, requires_grad=False):
+    arr = func() 
+    return Tensor(arr, device=device, dtype=dtype or str(arr.dtype), requires_grad=requires_grad)
+
+# Shape-based factories
+def zeros(shape, device="cpu", dtype=float32, requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.zeros(shape, device=device, dtype=dtype),
+                              device=device, dtype=dtype, requires_grad=requires_grad)
+
+def ones(shape, device="cpu", dtype=float32, requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.ones(shape, device=device, dtype=dtype),
+                              device=device, dtype=dtype, requires_grad=requires_grad)
+
+def empty(shape, device="cpu", dtype=float32, requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.empty(shape, device=device, dtype=dtype),
+                              device=device, dtype=dtype, requires_grad=requires_grad)
+
+def full(shape, fill_value, device="cpu", dtype=float32, requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.full(shape, fill_value, device=device, dtype=dtype),
+                              device=device, dtype=dtype, requires_grad=requires_grad)
+
+# Sequences 
+def arange(start, end, step=1, device="cpu", dtype="int32", requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.arange(start, end, step, device=device, dtype=dtype),
+                              device=device, dtype=dtype, requires_grad=requires_grad)
+
+def linspace(start, end, num=50, device="cpu", dtype=float32, requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.linspace(start, end, num, device, dtype), 
+                              requires_grad=requires_grad)
+# Eye and triangular
+def eye(N, M=None, k=0, device="cpu", dtype=float32, requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.eye(N, M=M, k=k, device=device, dtype=dtype),
+                              device=device, dtype=dtype, requires_grad=requires_grad)
+
+def tril(x, k=0, device="cpu", dtype=float32, requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.tril(x, k=k, device=device, dtype=dtype),
+                              device=device, dtype=dtype, requires_grad=requires_grad)
+
+# Random arrays
+def randn(shape, device="cpu", dtype=float32, requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.randn(shape, device=device, dtype=dtype),
+                              device=device, dtype=dtype, requires_grad=requires_grad)
+
+def rand(shape, device="cpu", dtype=float32, requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.rand(shape, device=device, dtype=dtype),
+                              device=device, dtype=dtype, requires_grad=requires_grad)
+
+def randint(low, high, shape, device="cpu", dtype=int32, requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.randint(low=low, high=high, shape=shape, device=device, dtype=dtype),
+                              device=device, dtype=dtype, requires_grad=requires_grad)
+
+# Like zeros/ones_like
+def zeros_like(tensor, device=None, dtype=None, requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.zeros_like(tensor.data, device=device, dtype=dtype),
+                              device=device, dtype=dtype, requires_grad=requires_grad)
+
+def ones_like(tensor, device=None, dtype=None, requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.ones_like(tensor.data, device=device, dtype=dtype),
+                              device=device, dtype=dtype, requires_grad=requires_grad)
+
+def empty_like(tensor, device=None, dtype=None, requires_grad=False):
+    return _tensor_from_array(lambda: ap.Array.empty_like(tensor.data, device=device, dtype=dtype),
+                              device=device, dtype=dtype, requires_grad=requires_grad)
