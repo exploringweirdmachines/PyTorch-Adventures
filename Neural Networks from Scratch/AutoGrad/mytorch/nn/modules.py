@@ -6,8 +6,9 @@ using .to()!
 import math
 import numpy as np
 import cupy as cp
-from ..tensor import Tensor
+from ..tensor import Tensor, zeros, ones
 from . import functional as F
+from . import initializations as init
 
 ######################
 ### Generic Module ###
@@ -296,18 +297,14 @@ class Linear(Module):
         self.bias = bias
         self.auto = auto
 
+        self.weight = zeros((out_features, in_features), requires_grad=True)
         k = math.sqrt(1 / in_features)
-        self.weight = Tensor(
-            np.random.uniform(-k, k, size=(out_features, in_features)),
-            requires_grad=True,
-        )
+        init.uniform_(self.weight, -k, k)
 
         if self.bias:
             self.use_bias = True
-            self.bias = Tensor(
-                np.random.uniform(-k, k, size=(out_features,)),
-                requires_grad=True,
-            )
+            self.bias = zeros((out_features,), requires_grad=True)
+            init.uniform_(self.bias)
         else:
             self.use_bias = False
             self.bias = None
@@ -332,10 +329,8 @@ class Embedding(Module):
         self.embedding_dim = embedding_dim
 
         limit = 1.0 / np.sqrt(embedding_dim)
-        self.weight = Tensor(
-            np.random.uniform(-limit, limit, size=(num_embeddings, embedding_dim)).astype(np.float32),
-            requires_grad=True
-        )
+        self.weight = zeros((num_embeddings, embedding_dim))
+        init.uniform_(self.weight, -limit, limit)
 
     def __call__(self, indices):
         return self.forward(indices)
@@ -369,6 +364,55 @@ class Dropout(Module):
         enable_dropout = self.training and (self.p > 0)
         return F.dropout(x, self.p, enable_dropout)
 
+class Conv1d(Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+
+        self.stride = stride
+        self.padding = padding
+        self.bias = bias
+
+        # Kaiming initialization (like PyTorch default for conv1d)
+        self.weight = zeros(shape=(out_channels, in_channels, kernel_size), requires_grad=True)
+        init.kaiming_uniform_(self.weight)
+
+        if bias:
+            self.use_bias = True
+            self.bias = zeros(shape=(out_channels,), requires_grad=True)
+        else:
+            self.use_bias = False
+            self.bias = None
+
+    def __call__(self, x):
+        return self.forward(x)
+
+    def __repr__(self):
+        args = [f"{self.in_channels}", f"{self.out_channels}", f"kernel_size={self.kernel_size}"]
+        
+        if self.stride != 1:
+            args.append(f"stride={self.stride}")
+        if self.padding != 0:
+            args.append(f"padding={self.padding}")
+        if not self.use_bias:
+            args.append("bias=False")
+    
+        return "Conv1d(" + ", ".join(args) + ")"
+    
+    def _extra_repr(self):
+        return (
+            f"{self.in_channels}, "
+            f"{self.out_channels}, "
+            f"kernel_size=({self.kernel_size}), "
+            f"stride={self.stride}, " 
+            f"padding={self.padding}, bias={self.use_bias}"
+        )
+
+    def forward(self, x: Tensor):
+        return F.conv1d(x, self.weight, self.bias, self.stride, self.padding)
+
 class Conv2d(Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True):
         super().__init__()
@@ -381,19 +425,15 @@ class Conv2d(Module):
         self.bias = bias
 
         # Kaiming initialization (like PyTorch default for conv2d)
-        k = math.sqrt(3 / (in_channels * kernel_size * kernel_size))
-        self.W = Tensor(
-            np.random.uniform(-k, k, size=(out_channels, in_channels, kernel_size, kernel_size), dtype=cp.float32),
-            requires_grad=True
-        )
+        self.weight = zeros(shape=(out_channels, in_channels, kernel_size, kernel_size), requires_grad=True)
+        init.kaiming_uniform_(self.weight)
 
         if bias:
-            self.b = Tensor(
-                np.random.uniform(-k, k, size=(out_channels,), dtype=cp.float32),
-                requires_grad=True
-            )
+            self.use_bias = True
+            self.bias = zeros(shape=(out_channels,), requires_grad=True)
         else:
-            self.b = None
+            self.use_bias = False
+            self.bias = None
 
     def __call__(self, x):
         return self.forward(x)
@@ -405,7 +445,7 @@ class Conv2d(Module):
             args.append(f"stride=({self.stride}, {self.stride})")
         if self.padding != 0:
             args.append(f"padding=({self.padding}, {self.padding})")
-        if not self.bias:
+        if not self.use_bias:
             args.append("bias=False")
     
         return "Conv2d(" + ", ".join(args) + ")"
@@ -416,11 +456,122 @@ class Conv2d(Module):
             f"{self.out_channels}, "
             f"kernel_size=({self.kernel_size}, {self.kernel_size}), "
             f"stride=({self.stride},{self.stride}), " 
-            f"padding=({self.padding}, {self.padding}), bias={self.bias}"
+            f"padding=({self.padding}, {self.padding}), bias={self.use_bias}"
         )
 
     def forward(self, x: Tensor):
-        return F.conv2d(x, self.W, self.b, self.stride, self.padding)
+        return F.conv2d(x, self.weight, self.bias, self.stride, self.padding)
+
+class ConvTranspose1d(Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, output_padding=0, bias=True):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.output_padding = output_padding
+        self.bias_flag = bias
+
+        # Initialize weights (Kaiming)
+        self.weight = zeros(shape=(in_channels, out_channels, kernel_size), requires_grad=True)
+        init.kaiming_uniform_(self.weight)
+
+        if bias:
+            self.use_bias = True
+            self.bias = zeros(shape=(out_channels,), requires_grad=True)
+        else:
+            self.use_bias = False
+            self.bias = None
+
+    def __call__(self, x):
+        return self.forward(x)
+
+    def __repr__(self):
+        args = [f"{self.in_channels}", f"{self.out_channels}", f"kernel_size={self.kernel_size}"]
+        if self.stride != 1:
+            args.append(f"stride={self.stride}")
+        if self.padding != 0:
+            args.append(f"padding={self.padding}")
+        if self.output_padding != 0:
+            args.append(f"output_padding={self.output_padding}")
+        if not self.use_bias:
+            args.append("bias=False")
+        return "ConvTranspose1d(" + ", ".join(args) + ")"
+
+    def _extra_repr(self):
+        return (
+            f"{self.in_channels}, "
+            f"{self.out_channels}, "
+            f"kernel_size={self.kernel_size}, "
+            f"stride={self.stride}, "
+            f"padding={self.padding}, "
+            f"output_padding={self.output_padding}, "
+            f"bias={self.use_bias}"
+        )
+
+    def forward(self, x: Tensor):
+        return F.conv_transpose1d(
+            x,
+            self.weight,
+            self.bias if self.use_bias else None,
+            stride=self.stride,
+            padding=self.padding,
+            output_padding=self.output_padding
+        )
+    
+class ConvTranspose2d(Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, output_padding=0, bias=True):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+
+        self.stride = stride
+        self.padding = padding
+        self.output_padding = output_padding
+        self.bias = bias
+
+        # Kaiming initialization (like PyTorch default for conv_transpose2d)
+        self.weight = zeros(shape=(in_channels, out_channels, kernel_size, kernel_size), requires_grad=True)
+        init.kaiming_uniform_(self.weight)
+
+        if bias:
+            self.use_bias = True
+            self.bias = zeros(shape=(out_channels,), requires_grad=True)
+        else:
+            self.use_bias = False
+            self.bias = None
+
+    def __call__(self, x):
+        return self.forward(x)
+
+    def __repr__(self):
+        args = [f"{self.in_channels}", f"{self.out_channels}", f"kernel_size={self.kernel_size}"]
+        
+        if self.stride != 1:
+            args.append(f"stride=({self.stride}, {self.stride})")
+        if self.padding != 0:
+            args.append(f"padding=({self.padding}, {self.padding})")
+        if self.output_padding != 0:
+            args.append(f"output_padding=({self.output_padding}, {self.output_padding})")
+        if not self.use_bias:
+            args.append("bias=False")
+    
+        return "ConvTranspose2d(" + ", ".join(args) + ")"
+    
+    def _extra_repr(self):
+        return (
+            f"{self.in_channels}, "
+            f"{self.out_channels}, "
+            f"kernel_size=({self.kernel_size}, {self.kernel_size}), "
+            f"stride=({self.stride},{self.stride}), " 
+            f"padding=({self.padding}, {self.padding}), "
+            f"output_padding=({self.output_padding}, {self.output_padding}), bias={self.use_bias}"
+        )
+
+    def forward(self, x: Tensor):
+        return F.conv_transpose2d(x, self.weight, self.bias, self.stride, self.padding, self.output_padding)
     
 class MaxPool2d(Module):
     def __init__(self, kernel_size, stride=None, padding=0):
@@ -520,10 +671,10 @@ class LayerNorm(Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.auto = auto
-        self.weight = Tensor(np.ones(shape=(embed_dim), dtype=np.float32), requires_grad=True)
+        self.weight = ones((embed_dim, ), requires_grad=True)
 
         if bias:
-            self.bias = Tensor(np.zeros(shape=(embed_dim), dtype=np.float32), requires_grad=True)
+            self.bias = zeros((embed_dim, ), requires_grad=True)
         else:
             self.bias = None
 
@@ -548,18 +699,18 @@ class BatchNorm2d(Module):
         self.momentum = momentum
 
         # Learnable parameters
-        self.gamma = Tensor(np.ones(num_features, dtype=np.float32), requires_grad=True)
-        self.beta = Tensor(np.zeros(num_features, dtype=np.float32), requires_grad=True)
+        self.weight = ones((num_features, ), requires_grad=True)
+        self.bias = zeros((num_features, ), requires_grad=True)
 
         # Non-trainable buffers
-        self.register_buffer("running_mean", Tensor(np.zeros(num_features, dtype=np.float32)))
-        self.register_buffer("running_var", Tensor(np.ones(num_features, dtype=np.float32)))
+        self.register_buffer("running_mean", ones((num_features, ), requires_grad=False))
+        self.register_buffer("running_var", zeros((num_features, ), requires_grad=False))
 
     def forward(self, x):
         return F.batchnorm(
             input=x,
-            gamma=self.gamma,
-            beta=self.beta,
+            weight=self.weight,
+            bias=self.bias,
             running_mean=self.running_mean,
             running_var=self.running_var,
             momentum=self.momentum,

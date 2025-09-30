@@ -7,18 +7,12 @@ auto=True indicates that we will use our autograd
 engine to compute grads. But for some known (and complex) ops, we 
 can manually define them as well which is auto=False 
 
-"""
-from ..tensor import Tensor
+Although we use np, they get piped through our Array ops
+so they remain cpu/gpu agnostic 
 
-def _prod_list(l):
-    """
-    quick helper method as np.prod(list) works
-    but cp.prod(list) raises an error!
-    """
-    prod = 1
-    for val in l:
-        prod *= val
-    return int(prod)
+"""
+import numpy as np
+from ..tensor import Tensor
 
 def linear(input, weight, bias=None, auto=False):
 
@@ -31,9 +25,6 @@ def linear(input, weight, bias=None, auto=False):
     W: (I,O)
     b: (O,)
     """
-
-    ### Get Backend ###
-    xp = input.xp  
 
     ### Normally data is in the shape of (N x I)
     reshaped = False
@@ -74,12 +65,14 @@ def linear(input, weight, bias=None, auto=False):
             input_xp = input_xp.reshape(-1, in_features)
 
         ### Do MatMul Op ###
-        output_shape = (_prod_list(dims), out_features) if reshaped else (input_xp.shape[0], out_features)
-        output = xp.empty(output_shape, dtype=input_xp.dtype)
-        xp.matmul(input_xp, weight_xp, out=output)
+        output_shape = (np.prod(dims), out_features) if reshaped else (input_xp.shape[0], out_features)
+
+        ### Preallocation Needs to Occur on the Correct Device ###
+        output = input.xp.empty(output_shape, dtype=input_xp.dtype)
+        np.matmul(input_xp, weight_xp, out=output)
 
         if bias is not None:
-            xp.add(output, bias_xp.reshape(1,-1), out=output)
+            np.add(output, bias_xp.reshape(1,-1), out=output)
 
         ### Return output to original shape (*, O) ###
         if reshaped:
@@ -96,7 +89,7 @@ def linear(input, weight, bias=None, auto=False):
 
             ### Standard Weight Update formula ###
             if weight.requires_grad:
-                grad_W = xp.matmul(input_xp.T, grad_output)
+                grad_W = np.matmul(input_xp.T, grad_output)
                 if weight.grad is None:
                     weight.grad = grad_W.T
                 else:
@@ -113,8 +106,8 @@ def linear(input, weight, bias=None, auto=False):
             ### Grad to Input ###
             if input.requires_grad:
 
-                grad_input = xp.matmul(grad_output, weight_xp.T)
-                
+                grad_input = np.matmul(grad_output, weight_xp.T)
+
                 ### Reshape grad_input back to input feature shape (* x I) ###
                 grad_input = grad_input.reshape(*dims, in_features)
                 
@@ -209,7 +202,7 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
 
     ### Pad Data If Padding is set ###
     if P > 0:
-        x_padded = xp.pad(input.data, ((0,0), (0,0), (P,P), (P,P)), mode='constant')
+        x_padded = np.pad(input.data, ((0,0), (0,0), (P,P), (P,P)), mode='constant')
     else:
         x_padded = input.data
 
@@ -238,10 +231,10 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
     weights_flat = weight.data.reshape(C_out, -1).T
 
     ### Forward ###
-    output = xp.empty(cols_flat.shape[0], weights_flat.shape[1])
-    xp.matmul(cols_flat, weights_flat, out=output)
+    output = input.xp.empty((cols_flat.shape[0], weights_flat.shape[1]))
+    np.matmul(cols_flat, weights_flat, out=output)
     if bias is not None:
-        xp.add(output, bias.data, out=output)
+        np.add(output, bias.data, out=output)
 
     #### Reshape back to (B x C_out x H_out x W_out) ###
     output = output.reshape(B, H_out*W_out, C_out).transpose(0,2,1).reshape(B, C_out, H_out, W_out)
@@ -545,8 +538,7 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
         if weight.requires_grad:
 
             ### grad_W is (B*H_out*W_out x C_in*K*K).T @ (B*H_out*W_out, C_out) -> (C_in*K*K x C_out) ###
-            grad_W = xp.empty(C_in*K*K, C_out, dtype=weight.dtypes)
-            xp.matmul(cols_flat.T, grad_output_flat, out=grad_W)
+            grad_W = xp.matmul(cols_flat.T, grad_output_flat)
 
             ### Remeber our weights are actually in the shape of (C_out x C_in x K x K), so ###
             ### we need a transpose first to (C_in*K*K x C_out) -> (C_out x C_in*K*K) -> (C_out, C_in, K, K) ###
@@ -567,21 +559,20 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
 
         # Input gradient
         if input.requires_grad:
+            
+            ### Compute Flattened Values and Indices for Vectorized add.at ###
+            num_k = C_in * K * K
+            num_p = H_out * W_out
 
             ### Get our gradients in the original shape ###
             ### (B*H*W, C_out) @ (C_out, C_in*K*K) -> [B*N_patches, C*K*K]
-            grad_cols_flat = xp.empty(B*num_p, C_in*K*K)
-            xp.matmul(grad_output_flat, weights_flat.T, out=grad_cols_flat) 
+            grad_cols_flat = xp.matmul(grad_output_flat, weights_flat.T) 
 
             ### Reshape to expose Batch dimension ###
             grad_cols = grad_cols_flat.reshape(B, H_out*W_out, C_in*K*K)
 
             ### Create empty tensor to accumulate grads into ###
             grad_input = xp.zeros_like(x_padded, dtype=x_padded.dtype)
-
-            ### Compute Flattened Values and Indices for Vectorized add.at ###
-            num_k = C_in * K * K
-            num_p = H_out * W_out
 
             ### Flatten Values in order of Batches and then Kernels and then Patches ###
             values_flat = grad_cols.transpose(0,2,1).reshape(-1)
@@ -634,7 +625,418 @@ def conv2d(input, weight, bias=None, stride=1, padding=0):
     if requires_grad:
         output._add_parents(input, weight, bias)
         
+    return output     
+
+def conv1d(input, weight, bias=None, stride=1, padding=0):
+
+    """
+    Almost identical to conv2d, just reduced a dimension
+    """
+    
+    ### Get Backend ###
+    xp = input.xp
+
+    ### Get Input/Output Shapes ###
+    B, C_in,  L_in = input.data.shape
+    C_out, _, K = weight.data.shape
+    S,P = stride, padding
+
+    L_out = (L_in + 2*P - K)//S + 1
+
+    ### Pad Data If Padding is set ###
+    if P > 0:
+        x_padded = np.pad(input.data, ((0,0), (0,0), (P,P)), mode='constant')
+    else:
+        x_padded = input.data
+
+    ### Use stride tricks for efficient im2col ###
+    
+    shape = (B, C_in, K, L_out)
+    strides = (
+        x_padded.strides[0], # Number of bits to move to get to next batch
+        x_padded.strides[1], # Number of bits to move to get to next channel
+        x_padded.strides[2], # Number of bits to move to get to next row in kernel
+        S*x_padded.strides[2], # Number of bits to move to get to next col in kernel
+    )
+
+    ### Grab Strided View of our Data (no extra copy needed!) ###
+    cols = xp.lib.stride_tricks.as_strided(x_padded, shape=shape, strides=strides)
+
+    cols_flat = cols.reshape(B*L_out, -1)
+    weights_flat = weight.data.reshape(C_out, -1).T
+
+    ### Forward ###
+    output = input.xp.empty((cols_flat.shape[0], weights_flat.shape[1]))
+    np.matmul(cols_flat, weights_flat, out=output)
+    if bias is not None:
+        np.add(output, bias.data, out=output)
+
+    #### Reshape back to (B x C_out x H_out x W_out) ###
+    output = output.reshape(B, L_out, C_out).transpose(0, 2, 1)
+
+    def _conv1d_backward(grad_output):
+        grad_output_flat = grad_output.transpose(0,2,1).reshape(B*L_out, C_out)
+
+        # Gradient w.r.t. weight
+        if weight.requires_grad:
+            grad_W = xp.matmul(cols_flat.T, grad_output_flat)
+            weight.grad = grad_W.T.reshape(C_out, C_in, K) if weight.grad is None else weight.grad + grad_W.T.reshape(C_out, C_in, K)
+
+        # Gradient w.r.t. bias
+        if bias is not None and bias.requires_grad:
+            grad_b = grad_output_flat.sum(axis=0)
+            bias.grad = grad_b if bias.grad is None else bias.grad + grad_b
+
+        # Gradient w.r.t. input
+        if input.requires_grad:
+            grad_cols_flat = xp.matmul(grad_output_flat, weights_flat.T)  # (B*L_out, C_in*K)
+            grad_cols = grad_cols_flat.reshape(B, L_out, C_in*K).transpose(0,2,1)  # (B, C_in*K, L_out)
+
+            grad_input = xp.zeros_like(x_padded)
+            # Compute indices for scatter-add
+            i0 = xp.repeat(xp.arange(K), C_in)
+            k = xp.tile(xp.arange(C_in), K)
+            i1 = S * xp.repeat(xp.arange(L_out), 1)
+
+            i = i0.reshape(-1,1) + i1.reshape(1,-1)
+            kk = xp.tile(k.reshape(-1,1), (1,L_out))
+
+            # Flatten for batch
+            bb = xp.repeat(xp.arange(B), C_in*K*L_out)
+            ii = xp.tile(i.flatten(), B)
+            kk_flat = xp.tile(kk.flatten(), B)
+            vals = grad_cols.flatten()
+
+            xp.add.at(grad_input, (bb, kk_flat, ii), vals)
+
+            if P > 0:
+                grad_input = grad_input[:, :, P:-P]
+
+            if input.grad is None:
+                input.grad = grad_input 
+            else:
+                input.grad += grad_input
+
+    requires_grad = input.requires_grad or weight.requires_grad or \
+                            (bias is not None and bias.requires_grad)
+    requires_grad = requires_grad and Tensor.build_graph_enabled()
+    output = Tensor(
+        output,
+        requires_grad=requires_grad,
+        grad_fn=_conv1d_backward if requires_grad else None,
+        grad_fn_name="<Conv1dBackward>" if requires_grad else None
+    )
+
+    
+    if requires_grad:
+        output._add_parents(input, weight, bias)
+        
     return output       
+
+def conv_transpose2d(input, weight, bias=None, stride=1, padding=0, output_padding=0):
+
+    """
+
+    ### CONVOLUTION RECAP ###
+    The setup for transpose convolution is very similar to standard convolutions, 
+    but with an important difference in its purpose. In a standard convolution, 
+    the goal is often to compress the spatial dimensions of the input. Each output pixel 
+    is computed from multiple input pixels, and because the convolutional filters slide over the 
+    input with overlap, a single input pixel can contribute to multiple output pixels.
+
+    To make standard convolutions efficient, we use the im2col algorithm. This rearranges 
+    all the sliding patches of the input into columns, allowing the convolution to be 
+    expressed as a fast matrix multiplication (GEMM) instead of slow nested loops. During 
+    backpropagation, we need to propagate gradients back to the input. Each upstream gradient 
+    affects all the input pixels that contributed to it, which is handled using col2im. 
+    Col2im scatters and accumulates the flattened gradients back into the original input shape, 
+    ensuring that overlapping contributions are summed correctly.
+
+    ### TRANSPOSE CONVS ARE BASICALLY THE SAME JUST BACKWARDS! ###
+
+    Transpose convolutions, on the other hand, have the goal of increasing spatial dimensions. 
+    Here, a single input pixel contributes to multiple output pixels, which is conceptually 
+    the inverse of standard convolution. Interestingly, this is very similar to the backward pass
+    of a regular convolution. In both cases, a single value spreads its influence across 
+    multiple positions: in backpropagation, a gradient spreads to all contributing inputs, 
+    and in transpose convolution, an input pixel spreads to multiple outputs.
+
+    This similarity allows us to reuse the same computational trick. Just like in 
+    backpropagation, we can flatten the input and use a col2im-like accumulation to distribute 
+    each input pixel’s contribution to the larger output space. Each “column” of the input, 
+    representing flattened channel and kernel dimensions, maps to multiple columns in the expanded output.
+    This makes transpose convolution efficient and easy to implement using the same underlying principles 
+    as standard convolution and its backward pass.
+
+    Backward pass of a transpose conv is pretty easy too then. A single input contributed to multiple outputs
+    so just accumulate all those contributions up and send them back! 
+
+    """
+    ### Set Backend ###
+    xp = input.xp
+    input_cp = input.data
+    weight_cp = weight.data
+    bias_cp = bias.data
+
+    ### Get Input/Output Shapes ###
+    B, C_in, H_in, W_in = input_cp.shape
+    C_in_w, C_out, K, _ = weight.data.shape
+    assert C_in_w == C_in, f"Input channel mismatch. Expecting {C_in_w} channels, got {C_in}"
+    S, P, OP = stride, padding, output_padding
+
+
+    ### Compute Temporary Output Shape (prepadding/cropping) (https://docs.pytorch.org/docs/stable/generated/torch.nn.ConvTranspose2d.html) ###
+    H_temp = (H_in - 1) * S + K
+    W_temp = (W_in - 1) * S + K
+
+    ### Final Output Shape ###
+    H_out = (H_in - 1) * S - 2*P + K + OP
+    W_out = (W_in - 1) * S - 2*P + K + OP
+
+    ### Flatten Data for MatMul (B x C_in x H x W) -> (B*H*W, C_in) ###
+    input_flat = input_cp.transpose(0,2,3,1).reshape(B*H_in*W_in, C_in)
+    
+    ### Flatten Weights for Op ###
+    weights_flat = weight_cp.reshape(C_in, C_out*K*K)
+    
+    ### Forward MatMul ###
+    cols_flat = xp.empty((B*H_in*W_in, C_out*K*K))
+    xp.matmul(input_flat, weights_flat, out=cols_flat)
+
+    ### Reshape Cols back to (B, H_in*W_in, C_out*K*K) ###
+    cols = cols_flat.reshape(B, H_in*W_in, C_out*K*K)
+
+    ### Create padded output tensor ###
+    output_padded = xp.zeros((B, C_out, H_temp, W_temp))
+
+    ### Compute Flattened Value and Indices for add.at ###
+    num_k = C_out * K * K
+    num_p = H_in * W_in
+
+    ### Flatten values in order of batch x kernels x patches ###
+    values_flat = cols.transpose(0,2,1).reshape(-1)
+    
+    ### Batch indexes ###
+    bb_flat = xp.repeat(xp.arange(B), num_k*num_p)
+
+    ### Indexing Op ###
+    i0 = xp.repeat(xp.arange(K), K)
+    i0 = xp.tile(i0, C_out)
+    j0 = xp.tile(xp.arange(K), K * C_out)
+    i1 = S * xp.repeat(xp.arange(H_in), W_in)
+    j1 = S * xp.tile(xp.arange(W_in), H_in)
+    i = i0.reshape(-1, 1) + i1.reshape(1, -1)
+    j = j0.reshape(-1, 1) + j1.reshape(1, -1)
+    k = xp.repeat(xp.arange(C_out), K * K)
+
+    ### Channel indices ###
+    kk_per_batch = xp.repeat(k, num_p)
+    kk_flat = xp.tile(kk_per_batch, B)
+
+    ### Tile row and col indices over batch ###
+    ii_flat = xp.tile(i.reshape(-1), B)
+    jj_flat = xp.tile(j.reshape(-1), B)
+
+    ### Accumulate into output_padded ###
+    xp.add.at(output_padded, (bb_flat, kk_flat, ii_flat, jj_flat), values_flat)
+    
+    ### Add extra padding if we want to match a specific output shape ###
+    if OP > 0:
+        output_padded = xp.pad(output_padded, ((0,0), (0,0), (0,OP), (0,OP)), mode="constant")
+
+    ### Crop off any padding to remove effect of padding ### 
+    ### If we had added extra padding from before, thats would ###
+    ### have made the overal size larger after this than if we ###
+    ### didnt include it ###
+    output_data = output_padded[:, :, P:P+H_out, P:P+W_out]
+    
+    if bias is not None:
+        output_data += bias_cp.reshape(1,-1,1,1)
+    
+    def _conv_transpose2d_backward(grad_output):
+
+        ### Flatten grad output to match output_data shape ###
+        grad_output_data = grad_output.reshape(B, C_out, H_out, W_out)
+
+        ### Create a grad_output_padded_full to store the values of our grads ###
+        H_padded = H_temp + OP
+        W_padded = W_temp + OP
+        grad_output_padded_full = xp.zeros((B, C_out, H_padded, W_padded), dtype=grad_output.dtype)
+
+        ### Add gradient contributions to the pre padded portion ###
+        grad_output_padded_full[:, :, P:P+H_out, P:P+W_out] += grad_output_data
+
+        ### Extract the pre-padded portion ###
+        grad_output_padded = grad_output_padded_full[:, :, :H_temp, :W_temp]
+
+        ### Gather the values_flat_grad from grad_output_padded using the same indexes from earlier ###
+        values_flat_grad = grad_output_padded[bb_flat, kk_flat, ii_flat, jj_flat]
+
+        ### Reshape back to grad_cols ###
+        grad_cols = values_flat_grad.reshape(B, num_k, num_p).transpose(0,2,1)
+        grad_cols_flat = grad_cols.reshape(B*H_in*W_in, C_out*K*K)
+
+        if weight.requires_grad:
+            ### grad_weights_flat = input_flat.T @ grad_cols_flat -> (C_in, C_out*K*K) ###
+            grad_weights_flat = xp.empty((C_in, C_out * K * K), dtype=weight.dtype)
+            xp.matmul(input_flat.T, grad_cols_flat, out=grad_weights_flat)
+
+            ### Reshape to (C_in, C_out, K, K) ###
+            grad_W = grad_weights_flat.reshape(C_in, C_out, K, K)
+
+            if weight.grad is None:
+                weight.grad = grad_W
+            else:
+                weight.grad += grad_W
+
+        if bias is not None and bias.requires_grad:
+            grad_b = grad_output_data.sum((0, 2, 3))
+
+            if bias.grad is None:
+                bias.grad = grad_b
+            else:
+                bias.grad += grad_b
+
+        if input.requires_grad:
+            ### grad_input_flat = grad_cols_flat @ weights_flat.T -> (B*H_in*W_in, C_in) ###
+            grad_input_flat = xp.empty((B * H_in * W_in, C_in))
+            xp.matmul(grad_cols_flat, weights_flat.T, out=grad_input_flat)
+
+            ### Reshape back, accounting for the transpose ###
+            grad_input_reshaped = grad_input_flat.reshape(B, H_in, W_in, C_in)
+            grad_input = grad_input_reshaped.transpose(0, 3, 1, 2)  # back to (B, C_in, H_in, W_in)
+
+            if input.grad is None:
+                input.grad = grad_input
+            else:
+                input.grad += grad_input
+
+    requires_grad = input.requires_grad or weight.requires_grad or \
+                    (bias is not None and bias.requires_grad)
+    requires_grad = requires_grad and Tensor.build_graph_enabled()
+    output = Tensor(
+        output_data,
+        requires_grad=requires_grad,
+        grad_fn=_conv_transpose2d_backward if requires_grad else None,
+        grad_fn_name="<ConvTranspose2dBackward>" if requires_grad else None
+    )
+
+    if requires_grad:
+        output._add_parents(input, weight, bias)
+        
+    return output
+
+def conv_transpose1d(input, weight, bias=None, stride=1, padding=0, output_padding=0):
+    """
+    Exactly the same as the conv_transpose2d, just with less dimensions!
+    """
+
+    xp = input.xp
+    input_cp = input.data
+    weight_cp = weight.data
+    bias_cp = bias.data if bias is not None else None
+
+    B, C_in, L_in = input_cp.shape
+    C_in_w, C_out, K = weight_cp.shape
+    assert C_in_w == C_in, f"Input channel mismatch. Expecting {C_in_w}, got {C_in}"
+    S, P, OP = stride, padding, output_padding
+
+    # Temporary output length before cropping
+    L_temp = (L_in - 1) * S + K
+    # Final output length
+    L_out = (L_in - 1) * S - 2*P + K + OP
+
+    # Flatten input for matmul
+    input_flat = input_cp.transpose(0, 2, 1).reshape(B*L_in, C_in)  # (B*L_in, C_in)
+    weights_flat = weight_cp.reshape(C_in, C_out*K)                  # (C_in, C_out*K)
+
+    # Forward matmul
+    cols_flat = xp.empty((B*L_in, C_out*K))
+    xp.matmul(input_flat, weights_flat, out=cols_flat)
+
+    # Reshape to (B, L_in, C_out*K)
+    cols = cols_flat.reshape(B, L_in, C_out*K)
+
+    # Padded output
+    output_padded = xp.zeros((B, C_out, L_temp))
+
+    # Flatten values for add.at
+    num_k = C_out * K
+    num_p = L_in
+    values_flat = cols.transpose(0, 2, 1).reshape(-1)
+
+    # Batch indices
+    bb_flat = xp.repeat(xp.arange(B), num_k * num_p)
+
+    # Compute indices for 1D
+    i0 = xp.repeat(xp.arange(K), C_out)
+    k = xp.tile(xp.arange(C_out), K)
+    i1 = S * xp.repeat(xp.arange(L_in), 1)
+    i = i0.reshape(-1, 1) + i1.reshape(1, -1)
+    kk_per_batch = xp.repeat(k, num_p)
+    kk_flat = xp.tile(kk_per_batch, B)
+    ii_flat = xp.tile(i.reshape(-1), B)
+
+    # Accumulate into output
+    xp.add.at(output_padded, (bb_flat, kk_flat, ii_flat), values_flat)
+
+    # Crop to final output
+    output_data = output_padded[:, :, P:P+L_out]
+
+    if bias is not None:
+        output_data += bias_cp.reshape(1, -1, 1)
+
+    # Backward function
+    def _conv_transpose1d_backward(grad_output):
+        grad_output_data = grad_output.reshape(B, C_out, L_out)
+
+        grad_output_padded = xp.zeros((B, C_out, L_temp), dtype=grad_output.dtype)
+        grad_output_padded[:, :, P:P+L_out] += grad_output_data
+
+        values_flat_grad = grad_output_padded[bb_flat, kk_flat, ii_flat]
+        grad_cols = values_flat_grad.reshape(B, num_k, num_p).transpose(0, 2, 1)
+        grad_cols_flat = grad_cols.reshape(B*L_in, C_out*K)
+
+        if weight.requires_grad:
+            grad_weights_flat = xp.empty((C_in, C_out*K), dtype=weight.dtype)
+            xp.matmul(input_flat.T, grad_cols_flat, out=grad_weights_flat)
+            grad_W = grad_weights_flat.reshape(C_in, C_out, K)
+            if weight.grad is None:
+                weight.grad = grad_W
+            else:
+                weight.grad += grad_W
+
+        if bias is not None and bias.requires_grad:
+            grad_b = grad_output_data.sum((0, 2))
+            if bias.grad is None:
+                bias.grad = grad_b
+            else:
+                bias.grad += grad_b
+
+        if input.requires_grad:
+            grad_input_flat = xp.empty((B*L_in, C_in))
+            xp.matmul(grad_cols_flat, weights_flat.T, out=grad_input_flat)
+            grad_input = grad_input_flat.reshape(B, L_in, C_in).transpose(0, 2, 1)
+            if input.grad is None:
+                input.grad = grad_input
+            else:
+                input.grad += grad_input
+
+    requires_grad = input.requires_grad or weight.requires_grad or \
+                    (bias is not None and bias.requires_grad)
+    requires_grad = requires_grad and Tensor.build_graph_enabled()
+
+    output = Tensor(
+        output_data,
+        requires_grad=requires_grad,
+        grad_fn=_conv_transpose1d_backward if requires_grad else None,
+        grad_fn_name="<ConvTranspose1dBackward>" if requires_grad else None
+    )
+
+    if requires_grad:
+        output._add_parents(input, weight, bias)
+
+    return output
 
 def maxpool2d(input, kernel_size, stride=None, padding=0):
     
@@ -1057,7 +1459,6 @@ def layernorm(input, weight, bias, eps=1e-5, auto=False):
         if bias is not None:
             xp.add(output, beta_cp.reshape(1,-1), out=output)
 
-
         ### Reshape Back if Needed ###
         output = output.reshape(*dims, embed_dim)
 
@@ -1068,8 +1469,7 @@ def layernorm(input, weight, bias, eps=1e-5, auto=False):
                 grad_output = grad_output.reshape(-1, embed_dim)
 
             if weight.requires_grad:
-                grad_gamma = xp.empty_like(gamma_cp)
-                xp.sum(grad_output * norm_x, axis=0, out=grad_gamma)
+                grad_gamma = xp.sum(grad_output * norm_x, axis=0)
 
                 if weight.grad is None:
                     weight.grad = grad_gamma
@@ -1087,26 +1487,10 @@ def layernorm(input, weight, bias, eps=1e-5, auto=False):
 
             if input.requires_grad:
                 
-                # grad_norm = grad_output * gamma_cp
-                # mean_grad = xp.mean(grad_norm, axis=-1, keepdims=True)
-                # mean_norm_grad = xp.mean(grad_norm * norm_x, axis=-1, keepdims=True)
-                # grad_input = (grad_norm - mean_grad - norm_x * mean_norm_grad) * inv_std
-
-                grad_input = xp.empty_like(grad_output)
-
-                grad_norm = xp.empty_like(grad_output, dtype=grad_output.dtype)
-                xp.multiply(grad_output, gamma_cp, out=grad_norm)
-
-                mean_grad = xp.empty((grad_norm.shape[0], 1), dtype=grad_norm.dtype)
-                xp.mean(grad_norm, axis=-1, keepdims=True, out=mean_grad)
-
-                mean_norm_grad = xp.empty_like(mean_grad)
-                xp.multiply(grad_norm, norm_x, out=grad_input)   # reuse grad_input temporarily
-                xp.mean(grad_input, axis=-1, keepdims=True, out=mean_norm_grad)
-
-                xp.subtract(grad_norm, mean_grad, out=grad_input)               # grad_input = grad_norm - mean_grad
-                xp.subtract(grad_input, norm_x * mean_norm_grad, out=grad_input) # grad_input -= norm_x * mean_norm_grad
-                xp.multiply(grad_input, inv_std, out=grad_input)      
+                grad_norm = grad_output * gamma_cp
+                mean_grad = xp.mean(grad_norm, axis=-1, keepdims=True)
+                mean_norm_grad = xp.mean(grad_norm * norm_x, axis=-1, keepdims=True)
+                grad_input = (grad_norm - mean_grad - norm_x * mean_norm_grad) * inv_std 
 
                 ### Put Back into Original Shape ###
                 if reshaped:
@@ -1146,7 +1530,7 @@ def batchnorm(input, weight, bias,
     """
 
     ### Get Backend ###
-    xp = input.backend 
+    xp = input.xp 
 
     N, C, *dims = input.shape
     reshaped = len(dims) > 0
@@ -1163,6 +1547,7 @@ def batchnorm(input, weight, bias,
         var = xp.var(x, axis=(0, 2), keepdims=True)
         running_mean.data[:] = (1 - momentum) * running_mean.data + momentum * mean.squeeze()
         running_var.data[:] = (1 - momentum) * running_var.data + momentum * var.squeeze()
+
     else:
         mean = running_mean.data.reshape(1, C, 1)
         var = running_var.data.reshape(1, C, 1)
@@ -1226,35 +1611,33 @@ def batchnorm(input, weight, bias,
     return output
 
 def sigmoid(x, auto=False):
-
     xp = x.xp 
 
     if auto:
         return 1 / (1 + (-x).exp())
-
     else:
-        
-        output = 1 / (1 + xp.exp(-x.data))
+        x_cp = x.data
+        out_data = 1 / (1 + xp.exp(-x_cp))
 
         def _sigmoid_backward(grad_output):
-            grad_input = grad_output * output * (1 - output)
+            grad_input = grad_output * out.data * (1 - out.data)
             if x.grad is None:
                 x.grad = grad_input
             else:
                 x.grad += grad_input
         
         requires_grad = x.requires_grad and Tensor.build_graph_enabled()
-        output = Tensor(
-            output, 
+        out = Tensor(
+            out_data, 
             requires_grad=requires_grad,
             grad_fn=_sigmoid_backward if requires_grad else None, 
             grad_fn_name="<SigmoidBackward>" if requires_grad else None
         )
 
         if requires_grad:
-            output._add_parents(x)
+            out._add_parents(x)
 
-        return output
+        return out
 
 def relu(input, auto=False):
 
@@ -1301,24 +1684,33 @@ def gelu(x):
     """
     
     xp = x.xp
+    data = x.data
 
     # Constants
-    sqrt_2_over_pi = xp.sqrt(2 / xp.pi).astype(x.data.dtype)
+    sqrt_2_over_pi = 0.7978845 # xp.sqrt(2 / xp.pi).astype(x.data.dtype)
+    coeff = 0.44715
 
-    # tanh approximation
-    inner = sqrt_2_over_pi * (x.data + 0.044715 * xp.power(x.data, 3))
+    #inner = sqrt_2_over_pi * (x + coeff * x^3)
+    x_squared = xp.power(data, 2)
+    x_cubed = x_squared * data
+
+    inner = sqrt_2_over_pi * (data + coeff * x_cubed)
+
+    ### Tanh out = tanh(inner) ###
     tanh_out = xp.tanh(inner)
-    out_data = 0.5 * x.data * (1.0 + tanh_out)
+    out_data = 0.5 * data * (1.0 + tanh_out)
 
     # Backward
     def _gelu_backward(grad_output):
 
         if x.requires_grad:
+    
+            inner_grad = sqrt_2_over_pi * (1.0 + 3.0 * coeff * x_squared)
+
             # derivative of GELU approximation (sech^2(x) = 1 - tanh^2(x))
             sech2 = 1 - xp.power(tanh_out, 2)  # derivative of tanh
-            inner_grad = sqrt_2_over_pi * (1 + 3 * 0.044715 * xp.power(x.data, 2))
 
-            grad_input = 0.5 * (1.0 + tanh_out + x.data * sech2 * inner_grad) * grad_output
+            grad_input = 0.5 * (1.0 + tanh_out + data * sech2 * inner_grad) * grad_output
 
             if x.grad is None:
                 x.grad = grad_input
@@ -1352,51 +1744,21 @@ def softmax(x, dim=-1, auto=False):
     
     else:
 
-        # # Numerical stability: subtract max along dim
-        # max_val = xp.max(x.data, axis=dim, keepdims=True)
-        # shifted = x.data - max_val
-        # exp_x = xp.exp(shifted)
-        # sum_exp = xp.sum(exp_x, axis=dim, keepdims=True)
-        # out_data = exp_x / sum_exp
-
+        # Numerical stability: subtract max along dim
         max_val = xp.max(x.data, axis=dim, keepdims=True)
-
-        shifted = xp.empty_like(x.data)
-        xp.subtract(x.data, max_val, out=shifted) 
-
-        exp_x = xp.empty_like(x.data)
-        xp.exp(shifted, out=exp_x)
-        
-        sum_exp = xp.empty_like(max_val)
-        xp.sum(exp_x, axis=dim, keepdims=True, out=sum_exp)
-
-        out_data = xp.empty_like(x.data)
-        xp.divide(exp_x, sum_exp, out=out_data)
+        shifted = x.data - max_val
+        exp_x = xp.exp(shifted)
+        sum_exp = xp.sum(exp_x, axis=dim, keepdims=True)
+        out_data = exp_x / sum_exp
 
         # Define manual backward
         def _softmax_backward(grad_output):
-            grad_output = xp.ascontiguousarray(grad_output)
 
             if x.requires_grad:
-                # # Softmax derivative: grad_input = s * (grad - sum(grad*s))
+                # Softmax derivative: grad_input = s * (grad - sum(grad*s))
                 # s = out_data
-                # sum_grad_s = xp.sum(grad_output * s, axis=dim, keepdims=True)
-                # grad_input = s * (grad_output - sum_grad_s)
-                
-                s = out_data
-                tmp = xp.empty_like(grad_output)
-                
-                # tmp = grad_output * s
-                xp.multiply(grad_output, s, out=tmp)
-                
-                # sum_grad_s = sum(tmp, axis=dim, keepdims=True)
-                sum_grad_s = xp.empty_like(sum_exp)
-                xp.sum(tmp, axis=dim, keepdims=True, out=sum_grad_s)
-                
-                # grad_input = s * (grad_output - sum_grad_s)
-                grad_input = xp.empty_like(grad_output)
-                xp.subtract(grad_output, sum_grad_s, out=grad_input)
-                xp.multiply(grad_input, s, out=grad_input)
+                sum_grad_s = xp.sum(grad_output * out_data, axis=dim, keepdims=True)
+                grad_input = out_data * (grad_output - sum_grad_s)
                 
                 if x.grad is None:
                     x.grad = grad_input
@@ -1431,7 +1793,10 @@ def cross_entropy(logits, targets, auto=False):
     *other_dims, num_classes = logits.shape
 
     ### Get total flattened dimension ###
-    flattened_dim = _prod_list(other_dims)
+    flattened_dim = np.prod(other_dims)
+
+    ### Make sure targets are always int32 ###
+    targets = targets.astype("int32")
     
     if auto:
         
@@ -1461,83 +1826,35 @@ def cross_entropy(logits, targets, auto=False):
     
     else:
         
-        # logits_data = logits.data.reshape(flattened_dim, num_classes)
-        # targets_data = targets.data.reshape(flattened_dim)
-
-        # ### Stable Softmax ###
-        # logits_shifted = logits_data - xp.max(logits_data, axis=1, keepdims=True)
-        # logsumexp = xp.log(xp.sum(xp.exp(logits_shifted), axis=1, keepdims=True))
-        # log_softmax = logits_shifted - logsumexp
-        
-        # # Negative log-likelihood
-        # #### EXTREMELY IMPORTANT DETAIL FOR FP16 TRAINING !!! ###
-        # #### IF WE SUM BEFORE WE DEVIDE OUR VALUES IT WILL GO TO INF ###
-        # ### DUE TO THE LOWER PRECISION!!! ###
-        # nll = -log_softmax[xp.arange(flattened_dim), targets_data] / flattened_dim 
-        # loss_value = xp.sum(nll)
-  
-        # def _cross_entropy_backward(grad_output):
-    
-        #     if logits.requires_grad:
-        #         # Softmax probabilities
-        #         grad_input = xp.exp(log_softmax)  # shape (B, C)
-        #         grad_input[xp.arange(flattened_dim), targets_data] -= 1
-        #         grad_input *= grad_output / flattened_dim  # scale by grad_output / batch_size
-        #         grad_input = grad_input.reshape(logits.shape)
-
-        #         if logits.grad is None:
-        #             logits.grad = grad_input
-        #         else:
-        #             logits.grad += grad_input
-                    
-        xp = logits.xp
-        batch_size, num_classes = logits.shape[:2]
-        flattened_dim = batch_size  # assuming logits already 2D or flattened
-
         logits_data = logits.data.reshape(flattened_dim, num_classes)
         targets_data = targets.data.reshape(flattened_dim)
 
-        # --- Stable Softmax preallocation ---
-        logits_shifted = xp.empty_like(logits_data)
-        max_vals = xp.max(logits_data, axis=1, keepdims=True)
-        xp.subtract(logits_data, max_vals, out=logits_shifted)
-
-        exp_logits = xp.empty_like(logits_shifted)
-        xp.exp(logits_shifted, out=exp_logits)
-
-        sum_exp = xp.empty((flattened_dim, 1), dtype=logits_data.dtype)
-        xp.sum(exp_logits, axis=1, keepdims=True, out=sum_exp)
-
-        logsumexp = xp.empty_like(sum_exp)
-        xp.log(sum_exp, out=logsumexp)
-
-        log_softmax = xp.empty_like(logits_data)
-        xp.subtract(logits_shifted, logsumexp, out=log_softmax)
-
-        nll = -log_softmax[xp.arange(flattened_dim), targets_data] / flattened_dim
+        ### Stable Softmax ###
+        logits_shifted = logits_data - xp.max(logits_data, axis=1, keepdims=True)
+        logsumexp = xp.log(xp.sum(xp.exp(logits_shifted), axis=1, keepdims=True))
+        log_softmax = logits_shifted - logsumexp
+        
+        # Negative log-likelihood
+        #### EXTREMELY IMPORTANT DETAIL FOR FP16 TRAINING !!! ###
+        #### IF WE SUM BEFORE WE DEVIDE OUR VALUES IT WILL GO TO INF ###
+        ### DUE TO THE LOWER PRECISION!!! ###
+        nll = -log_softmax[xp.arange(flattened_dim), targets_data] / flattened_dim 
         loss_value = xp.sum(nll)
-
+  
         def _cross_entropy_backward(grad_output):
+    
             if logits.requires_grad:
-                grad_input = xp.empty_like(log_softmax)
-                xp.exp(log_softmax, out=grad_input)  # softmax probabilities
-
-                # Subtract 1 at correct target positions
+                # Softmax probabilities
+                grad_input = xp.exp(log_softmax)  # shape (B, C)
                 grad_input[xp.arange(flattened_dim), targets_data] -= 1
-
-                # Scale by grad_output / batch_size
-                xp.multiply(grad_input, grad_output / flattened_dim, out=grad_input)
-
-                # Reshape to original logits shape
+                grad_input *= grad_output / flattened_dim  # scale by grad_output / batch_size
                 grad_input = grad_input.reshape(logits.shape)
 
-                # Accumulate into logits.grad
                 if logits.grad is None:
                     logits.grad = grad_input
                 else:
-                    xp.add(logits.grad, grad_input, out=logits.grad)
+                    logits.grad += grad_input
                     
-
         requires_grad = logits.requires_grad
         out = Tensor(
             xp.array(loss_value, dtype=logits.dtype),
@@ -1552,34 +1869,36 @@ def cross_entropy(logits, targets, auto=False):
 
         return out
 
-# def mse_loss(pred, labels, auto=False):
+def mse_loss(pred, labels, auto=False):
 
-#     if auto:
-#         return ((pred - labels)**2).mean(dim=0)
+    if auto:
+        return ((pred - labels)**2).mean()
 
-#     else:
+    else:
+
+        diff = pred.data - labels.data
+        out_data = (diff**2).mean()
+
+        def _mse_backward(grad_output):
+
+            N = diff.shape[0]
+            grad_input = (2.0 / N) * diff * grad_output
+
+            if pred.grad is None:
+                pred.grad = grad_input
+            else:
+                pred.grad += grad_input
         
-#         diff = pred.data - labels.data
-#         out_data = (diff**2).mean(axis=0)
+        requires_grad = pred.requires_grad
+        out = Tensor(
+            out_data,
+            requires_grad=requires_grad,
+            grad_fn=_mse_backward if requires_grad else None,
+            grad_fn_name="<MSEBackward>" if requires_grad else None
+        )
 
-#         def _mse_backward(grad_output):
-#             N = diff.shape[0]
-#             grad_input = (2.0 / N) * diff * grad_output
-
-#             if pred.grad is None:
-#                 pred.grad = cp.zeros_like(pred.data, dtype=pred.data.dtype)
-#             pred.grad += grad_input
-
-#         requires_grad = pred.requires_grad
-#         out = Tensor(
-#             out_data,
-#             requires_grad=requires_grad,
-#             grad_fn=_mse_backward if requires_grad else None,
-#             grad_fn_name="<MSEBackward>" if requires_grad else None
-#         )
-
-#         if requires_grad:
-#             out._add_parents(pred)
+        if requires_grad:
+            out._add_parents(pred)
         
-#         return out
+        return out
 
