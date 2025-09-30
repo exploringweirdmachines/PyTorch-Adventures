@@ -1,4 +1,6 @@
+import numpy as np
 import cupy as cp
+import mytorch
 import mytorch.nn as nn
 
 class Embeddings(nn.Module):
@@ -23,12 +25,65 @@ class Embeddings(nn.Module):
         x = self.char_embeddings(input_ids)
 
         ### Add Positional Information ###
-        avail_idx = cp.arange(0, seq_length, dtype=cp.int32)
+        avail_idx = mytorch.arange(start=0, end=seq_length).to(input_ids.device)
         pos_embed = self.position_embeddings(avail_idx).reshape(1, seq_length, self.embed_dim)
         x = x + pos_embed
 
         return x
     
+# class Attention(nn.Module):
+
+#     def __init__(self, embed_dim, num_heads, attn_dropout_p=0.1, use_bias=True):
+#         super().__init__()
+#         ### Sanity Checks ###
+#         assert embed_dim % num_heads == 0, "Double check embedding dim divisible by number of heads"
+
+#         ### Attention Head Dim ###
+#         self.embed_dim = embed_dim
+#         self.num_heads = num_heads
+#         self.head_dim = embed_dim // num_heads
+
+#         # ### Attention Projections ###
+#         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=False)
+#         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=False)
+#         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=False)
+#         self.softmax = nn.Softmax(auto=False)
+#         self.attn_drop = nn.Dropout(dropout_p=attn_dropout_p)
+
+#         ### Post Attention Projection ###
+#         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=False)
+#         self.proj_drop = nn.Dropout(dropout_p=attn_dropout_p)
+        
+
+#     def forward(self, x, attention_mask=None):
+        
+#         ### Store Shape ###
+#         batch, seq_len, embed_dim = x.shape
+
+#         # ### Compute Projections and make Contiguous ###
+#         q = self.q_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
+#         k = self.k_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
+#         v = self.v_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
+        
+#         ### Compute Attention (Attention Mask has shape Batch x Sequence len x Sequence len) ###
+#         scores = (q @ k.transpose(-2, -1)) / self.head_dim**0.5
+        
+#         ### Add attention mask if it exists ###
+#         if attention_mask is not None:
+#             scores = scores + attention_mask.astype(scores.data.dtype)
+  
+#         attention = self.softmax(scores, dim=-1)
+#         attention = self.attn_drop(attention)
+
+#         output = attention @ v
+#         output = output.transpose(1,2).reshape(batch,seq_len,embed_dim)
+        
+#         ### Compute Output Projection (on flattened dimension) ###
+#         output = self.out_proj(output)
+#         output = self.proj_drop(output)
+
+#         return output
+
 class Attention(nn.Module):
 
     def __init__(self, embed_dim, num_heads, attn_dropout_p=0.1, use_bias=True):
@@ -41,10 +96,8 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
 
-        ### Attention Projections ###
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias)
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias)
+        # ### Attention Projections ###
+        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=use_bias)
         self.softmax = nn.Softmax()
         self.attn_drop = nn.Dropout(dropout_p=attn_dropout_p)
 
@@ -54,29 +107,34 @@ class Attention(nn.Module):
         
 
     def forward(self, x, attention_mask=None):
-     
-        ### Store Shape ###
         batch, seq_len, embed_dim = x.shape
 
-        ### Compute Projections and make Contiguous ###
-        q = self.q_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2).contiguous()
-        k = self.k_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2).contiguous()
-        v = self.v_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2).contiguous()
-        
-        ### Compute Attention (Attention Mask has shape Batch x Sequence len x Sequence len) ###
-        scores = (q @ k.transpose(-2, -1).contiguous()) / self.head_dim**0.5
-    
-        ### Add attention mask if it exists ###
+        # QKV projection
+        qkv = self.qkv_proj(x)  # [batch, seq_len, 3*embed_dim]
+
+        # Reshape to multi-head
+        qkv = qkv.reshape(batch, seq_len, self.num_heads, 3 * self.head_dim)
+
+        # Transpose to [batch, num_heads, seq_len, 3*head_dim]
+        qkv = qkv.transpose(1, 2)
+
+        # Chunk last dim into q, k, v
+        q, k, v = qkv.chunk(3, dim=-1)  # each [batch, num_heads, seq_len, head_dim]
+
+        # Compute attention scores
+        scores = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
+
         if attention_mask is not None:
-            scores += attention_mask
-     
+            scores = scores + attention_mask.astype(scores.data.dtype)
+
         attention = self.softmax(scores, dim=-1)
         attention = self.attn_drop(attention)
 
+        # Attention output
         output = attention @ v
-        output = output.transpose(1,2).reshape(batch,seq_len,embed_dim).contiguous()
-        
-        ### Compute Output Projection (on flattened dimension) ###
+        output = output.transpose(1, 2).reshape(batch, seq_len, embed_dim)
+
+        # Output projection
         output = self.out_proj(output)
         output = self.proj_drop(output)
 
@@ -126,12 +184,12 @@ class TransformerBlock(nn.Module):
         self.layernorm2 = nn.LayerNorm(embed_dim, bias=use_bias)
 
     def forward(self, x, attention_mask=None):
-
+        
         attn_out = self.attention(self.layernorm1(x), attention_mask)
         x = x + attn_out
         mlp_out = self.feedforward(self.layernorm2(x))
         x = x + mlp_out
-
+     
         return x
 
 class GPT2(nn.Module):
@@ -148,7 +206,7 @@ class GPT2(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.vocab_size = vocab_size
-
+        
         self.embeddings = Embeddings(vocab_size=vocab_size, 
                                      embed_dim=embed_dim, 
                                      context_length=max_seq_len)
@@ -164,51 +222,36 @@ class GPT2(nn.Module):
         ])
 
         self.final_layer_norm = nn.LayerNorm(embed_dim=embed_dim)
-        self.lm_head = nn.Linear(embed_dim, vocab_size, bias=use_bias)
+        self.lm_head = nn.Linear(embed_dim, vocab_size, bias=True)
 
         ### Initialize Weights ###
         self.apply(_init_weights)
         for name, param in self.named_parameters():
             if "out_proj" in name:
-                param.data = cp.random.normal(
-                    loc=0.0, scale=(0.02 / cp.sqrt(2 * num_blocks)), 
-                    size=param.shape, dtype=cp.float32
-                )
-                
-        ### Weight Tying ###
-        self.lm_head.weight.data = self.embeddings.char_embeddings.weight.data.T
+                mytorch.nn.init.normal_(param, mean=0.0, std=(0.02/np.sqrt(2 * num_blocks)))
 
     def forward(self, x, attention_mask=None):
 
         x = self.embeddings(x)
-
+        
         for block in self.blocks:
             x = block(x, attention_mask)
-
-        x = self.final_layer_norm(x)     
+        x = self.final_layer_norm(x)    
         x = self.lm_head(x)
 
         return x
     
 ### Standard Weight Init for Transformers ###
 def _init_weights(module):
-
     if isinstance(module, nn.Linear):
-        # Normal init for weights
-        module.weight.data[...] = cp.random.normal(
-            0.0, 0.02, size=module.weight.data.shape
-        ).astype(cp.float32)
-        print("its happening")
-
+        mytorch.nn.init.normal_(module.weight, mean=0, std=0.02)
         if module.bias is not None:
-            module.bias.data[...] = 0.0  
+            mytorch.nn.init.zeros_(module.bias)
 
     elif isinstance(module, nn.Embedding):
-        module.weight.data[...] = cp.random.normal(
-            0.0, 0.02, size=module.weight.data.shape
-        ).astype(cp.float32)
+        mytorch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     elif isinstance(module, nn.LayerNorm):
-        module.weight.data[...] = 1.0
+        mytorch.nn.init.ones_(module.weight)
         if module.bias is not None:
-            module.bias.data[...] = 0.0
+            mytorch.nn.init.zeros_(module.bias)
