@@ -561,14 +561,6 @@ class Array:
 
     @classmethod
     def randn(cls, shape, device="cpu", dtype="float32"):
-        """
-        Return an Array with standard normal values of given shape.
-        
-        Args:
-            shape (tuple of int): Shape of the array.
-            device (str): 'cpu' or 'cuda[:idx]'.
-            dtype (str): Desired data type, e.g., 'float32'.
-        """
         xp = np if "cpu" in device else cp
         tgt_device_idx = None
         
@@ -586,14 +578,6 @@ class Array:
     
     @classmethod
     def rand(cls, shape, device="cpu", dtype="float32"):
-        """
-        Return an Array with standard uniform values in [0, 1) of given shape.
-
-        Args:
-            shape (tuple of int): Shape of the array.
-            device (str): 'cpu' or 'cuda[:idx]'.
-            dtype (str): Desired data type, e.g., 'float32'.
-        """
         xp = np if "cpu" in device else cp
         tgt_device_idx = None
 
@@ -637,6 +621,18 @@ class Array:
         dtype = dtype or str(other.dtype)
         return cls._wrap_factory("empty_like", other, device=device, dtype=dtype)
     
+    @classmethod
+    def randn_like(cls, other, device=None, dtype=None):
+        device = device or other.device
+        dtype = dtype or str(other.dtype)
+        return cls.randn(other.shape, device=device, dtype=dtype)
+    
+    @classmethod
+    def rand_like(cls, other, device=None, dtype=None):
+        device = device or other.device
+        dtype = dtype or str(other.dtype)
+        return cls.rand(other.shape, device=device, dtype=dtype)
+
 # Attach binary, unary, and inplace operations
 for dunder, ufunc in Array._binary_ufuncs.items():
     reflect = dunder.startswith("__r")
