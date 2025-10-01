@@ -13,6 +13,7 @@ so they remain cpu/gpu agnostic
 """
 import numpy as np
 from ..tensor import Tensor
+from . import fused_ops as K
 
 def linear(input, weight, bias=None, auto=False):
 
@@ -1364,10 +1365,8 @@ def dropout(input, dropout_p, training=True, auto=False):
     if not training or dropout_p == 0.0:
         return input
 
-    xp = input.xp
-
     ### Sample Mask ###
-    mask = (xp.random.random_sample(input.data.shape) >= dropout_p).astype(input.dtype)
+    mask = (input.xp.random.random_sample(input.data.shape) >= dropout_p).astype(input.dtype)
     ratio = 1 / (1 - dropout_p)
     mask *= ratio
 
@@ -1411,7 +1410,6 @@ def layernorm(input, weight, bias, eps=1e-5, auto=False):
 
     """
     
-    xp = input.xp
     reshaped = False
     *dims, embed_dim = input.shape
 
@@ -1424,7 +1422,7 @@ def layernorm(input, weight, bias, eps=1e-5, auto=False):
         if reshaped:
             input = input.reshape(-1, embed_dim)
         
-        var_x = (input.var(dim=-1, keepdims=True) + eps).astype(xp.float32)
+        var_x = (input.var(dim=-1, keepdims=True) + eps)#.astype(xp.float32)
         norm_x = (input - input.mean(dim=-1, keepdims=True)) / var_x**0.5
         scale_shifted_x = norm_x * weight.reshape(1,-1) 
         
@@ -1448,16 +1446,16 @@ def layernorm(input, weight, bias, eps=1e-5, auto=False):
             input_cp = input_cp.reshape(-1, embed_dim)
         
         ### Compute Mean and Var Along Last Dimension ###
-        mean = xp.mean(input_cp, axis=-1, keepdims=True)
-        var = xp.var(input_cp, axis=-1, keepdims=True)
-        inv_std = xp.reciprocal(xp.sqrt(var + eps))
+        mean = np.mean(input_cp, axis=-1, keepdims=True)
+        var = np.var(input_cp, axis=-1, keepdims=True)
+        inv_std = np.reciprocal(np.sqrt(var + eps))
 
-        output = xp.empty_like(input_cp)
-        norm_x = xp.subtract(input_cp, mean, out=output)
-        xp.multiply(output, inv_std, out=output)
-        xp.multiply(output, gamma_cp.reshape(1,-1), out=output)
+        output = np.empty_like(input_cp)
+        norm_x = np.subtract(input_cp, mean, out=output)
+        np.multiply(output, inv_std, out=output)
+        np.multiply(output, gamma_cp.reshape(1,-1), out=output)
         if bias is not None:
-            xp.add(output, beta_cp.reshape(1,-1), out=output)
+            np.add(output, beta_cp.reshape(1,-1), out=output)
 
         ### Reshape Back if Needed ###
         output = output.reshape(*dims, embed_dim)
@@ -1469,7 +1467,7 @@ def layernorm(input, weight, bias, eps=1e-5, auto=False):
                 grad_output = grad_output.reshape(-1, embed_dim)
 
             if weight.requires_grad:
-                grad_gamma = xp.sum(grad_output * norm_x, axis=0)
+                grad_gamma = np.sum(grad_output * norm_x, axis=0)
 
                 if weight.grad is None:
                     weight.grad = grad_gamma
@@ -1478,7 +1476,7 @@ def layernorm(input, weight, bias, eps=1e-5, auto=False):
             
             if bias is not None:
                 if bias.requires_grad:
-                    grad_beta = xp.sum(grad_output, axis=0)
+                    grad_beta = np.sum(grad_output, axis=0)
                     
                     if bias.grad is None:
                         bias.grad = grad_beta
@@ -1488,8 +1486,8 @@ def layernorm(input, weight, bias, eps=1e-5, auto=False):
             if input.requires_grad:
                 
                 grad_norm = grad_output * gamma_cp
-                mean_grad = xp.mean(grad_norm, axis=-1, keepdims=True)
-                mean_norm_grad = xp.mean(grad_norm * norm_x, axis=-1, keepdims=True)
+                mean_grad = np.mean(grad_norm, axis=-1, keepdims=True)
+                mean_norm_grad = np.mean(grad_norm * norm_x, axis=-1, keepdims=True)
                 grad_input = (grad_norm - mean_grad - norm_x * mean_norm_grad) * inv_std 
 
                 ### Put Back into Original Shape ###
@@ -1611,13 +1609,12 @@ def batchnorm(input, weight, bias,
     return output
 
 def sigmoid(x, auto=False):
-    xp = x.xp 
 
     if auto:
         return 1 / (1 + (-x).exp())
     else:
         x_cp = x.data
-        out_data = 1 / (1 + xp.exp(-x_cp))
+        out_data = 1 / (1 + np.exp(-x_cp))
 
         def _sigmoid_backward(grad_output):
             grad_input = grad_output * out.data * (1 - out.data)
@@ -1641,14 +1638,12 @@ def sigmoid(x, auto=False):
 
 def relu(input, auto=False):
 
-    xp = input.xp 
-
     if auto:
-        mask = Tensor(xp.where(input.data < 0, 0, 1).astype(input.dtype))
+        mask = Tensor(np.where(input.data < 0, 0, 1).astype(input.dtype))
         return input * mask
     else:
   
-        out_data = xp.maximum(input.data, 0, out=xp.empty_like(input.data))
+        out_data = np.maximum(input.data, 0, out=np.empty_like(input.data))
 
         def _relu_backward(input_grad):
             if input.requires_grad:
@@ -1682,8 +1677,7 @@ def gelu(x):
     Forward method is Equation 24
     Backward methdo is Equation 42-43
     """
-    
-    xp = x.xp
+
     data = x.data
 
     # Constants
@@ -1691,13 +1685,13 @@ def gelu(x):
     coeff = 0.44715
 
     #inner = sqrt_2_over_pi * (x + coeff * x^3)
-    x_squared = xp.power(data, 2)
+    x_squared = np.power(data, 2)
     x_cubed = x_squared * data
 
     inner = sqrt_2_over_pi * (data + coeff * x_cubed)
 
     ### Tanh out = tanh(inner) ###
-    tanh_out = xp.tanh(inner)
+    tanh_out = np.tanh(inner)
     out_data = 0.5 * data * (1.0 + tanh_out)
 
     # Backward
@@ -1708,7 +1702,7 @@ def gelu(x):
             inner_grad = sqrt_2_over_pi * (1.0 + 3.0 * coeff * x_squared)
 
             # derivative of GELU approximation (sech^2(x) = 1 - tanh^2(x))
-            sech2 = 1 - xp.power(tanh_out, 2)  # derivative of tanh
+            sech2 = 1 - np.power(tanh_out, 2)  # derivative of tanh
 
             grad_input = 0.5 * (1.0 + tanh_out + data * sech2 * inner_grad) * grad_output
 
@@ -1730,9 +1724,7 @@ def gelu(x):
 
     return out
 
-def softmax(x, dim=-1, auto=False):
-
-    xp = x.xp
+def softmax(x, dim=-1, auto=False, fused=True):
 
     if auto:
 
@@ -1743,28 +1735,114 @@ def softmax(x, dim=-1, auto=False):
         return exp_x / sum_exp
     
     else:
+        
+ 
+        if not fused:
+            # Numerical stability: subtract max along dim
+            max_val = np.max(x.data, axis=dim, keepdims=True)
+            shifted = x.data - max_val
+            exp_x = np.exp(shifted)
+            sum_exp = np.sum(exp_x, axis=dim, keepdims=True)
+            out_data = exp_x / sum_exp
 
-        # Numerical stability: subtract max along dim
-        max_val = xp.max(x.data, axis=dim, keepdims=True)
-        shifted = x.data - max_val
-        exp_x = xp.exp(shifted)
-        sum_exp = xp.sum(exp_x, axis=dim, keepdims=True)
-        out_data = exp_x / sum_exp
+            # Define manual backward
+            def _softmax_backward(grad_output):
 
-        # Define manual backward
-        def _softmax_backward(grad_output):
+                if x.requires_grad:
+                    # Softmax derivative: grad_input = s * (grad - sum(grad*s))
+                    # s = out_data
+                    sum_grad_s = np.sum(grad_output * out_data, axis=dim, keepdims=True)
+                    grad_input = out_data * (grad_output - sum_grad_s)
+                    
+                    if x.grad is None:
+                        x.grad = grad_input
+                    else:
+                        x.grad += grad_input
+        else:
+            ### Fused Ops Need Access to Raw Arrays and they must be on CUDA ###
+            if hasattr(x.data, "_array"):
+                array = x.data._array
+            else:
+                array = x.data
+            
+            orig_shape = array.shape
+            ndim = len(orig_shape)
 
-            if x.requires_grad:
-                # Softmax derivative: grad_input = s * (grad - sum(grad*s))
-                # s = out_data
-                sum_grad_s = xp.sum(grad_output * out_data, axis=dim, keepdims=True)
-                grad_input = out_data * (grad_output - sum_grad_s)
-                
+            # grabs the dim we want. If we have ndim=4 and we want to take softmax #
+            # over dim=2, then 2%4 is just 2. But if we say -1, then -1 % 4 is 3. #
+            dim = dim % ndim 
+
+            ### Permute so target dim is last ###
+            if dim != ndim - 1:
+
+                ### Put all other dimensions first ###
+                permute_axis = [i for i in range(ndim) if i != dim] + [dim]
+                array_perm = array.transpose(permute_axis)
+            
+            else:
+                array_perm = array
+
+            ### Flatten to (*,I) ###
+            n_rows = int(np.prod(array_perm.shape[:-1]))
+            n_cols = array_perm.shape[-1]
+            reshaped = array_perm.reshape(n_rows, n_cols)
+            
+            ### Fused Softmax ###
+            out_flat = K.fused_softmax_forward(reshaped)
+
+            ### Reshape Back ###
+            out_perm = out_flat.reshape(array_perm.shape)
+            
+            if dim != ndim - 1:
+                inv_permute = np.argsort(permute_axis)
+                out_data = out_perm.transpose(inv_permute)
+            else:
+                out_data = out_perm
+        
+            def _softmax_backward(input_grad):
+
+                # Extract raw array
+                if hasattr(input_grad, "_array"):
+                    grad_array = input_grad._array
+                else:
+                    grad_array = input_grad
+
+                # Get shapes
+                orig_shape = grad_array.shape
+                ndim = len(orig_shape)
+                dim_idx = dim % ndim  # support negative dims
+
+                # Flatten our grad and out data ###
+                if dim_idx != ndim - 1:
+                    permute_axes = [i for i in range(ndim) if i != dim_idx] + [dim_idx]
+                    grad_perm = grad_array.transpose(permute_axes)
+                    out_perm = out_data.transpose(permute_axes)  # permute softmax output similarly
+                else:
+                    grad_perm = grad_array
+                    out_perm = out_data
+
+                n_rows = int(np.prod(grad_perm.shape[:-1]))
+                n_cols = grad_perm.shape[-1]
+                grad_flat = grad_perm.reshape(n_rows, n_cols)
+                out_flat = out_perm.reshape(n_rows, n_cols)
+
+                ### Fused Backward Op ###
+                grad_input_flat = K.fused_softmax_backward(grad_flat, out_flat)
+
+                # Step 4: Reshape back
+                grad_input_perm = grad_input_flat.reshape(grad_perm.shape)
+
+                if dim_idx != ndim - 1:
+                    inv_permute = np.argsort(permute_axes)
+                    grad_input = grad_input_perm.transpose(inv_permute)
+                else:
+                    grad_input = grad_input_perm
+
                 if x.grad is None:
                     x.grad = grad_input
                 else:
                     x.grad += grad_input
-
+                 
         out = Tensor(
             out_data,
             requires_grad=x.requires_grad,
@@ -1786,8 +1864,6 @@ def cross_entropy(logits, targets, auto=False):
     logits: (* x num_classes)
     targets (*, )
     """
-    
-    xp = logits.xp 
 
     ### Flatten Logits to be (*, num_classes) ###
     *other_dims, num_classes = logits.shape
@@ -1800,7 +1876,6 @@ def cross_entropy(logits, targets, auto=False):
     
     if auto:
         
-
         ### Flatten Logits ###
         logits = logits.reshape(flattened_dim, num_classes)
 
@@ -1817,7 +1892,7 @@ def cross_entropy(logits, targets, auto=False):
         log_softmax = logits_shifted - logsumexp
 
         ### Negative Log Likelihood For Correct Class ###
-        nll = -log_softmax[xp.arange(flattened_dim), targets] / flattened_dim
+        nll = -log_softmax[np.arange(flattened_dim), targets] / flattened_dim
 
         ### Mean Loss ###
         loss = nll.sum()
@@ -1830,23 +1905,24 @@ def cross_entropy(logits, targets, auto=False):
         targets_data = targets.data.reshape(flattened_dim)
 
         ### Stable Softmax ###
-        logits_shifted = logits_data - xp.max(logits_data, axis=1, keepdims=True)
-        logsumexp = xp.log(xp.sum(xp.exp(logits_shifted), axis=1, keepdims=True))
+        logits_shifted = logits_data - np.max(logits_data, axis=1, keepdims=True)
+        logsumexp = np.log(np.sum(np.exp(logits_shifted), axis=1, keepdims=True))
         log_softmax = logits_shifted - logsumexp
         
         # Negative log-likelihood
         #### EXTREMELY IMPORTANT DETAIL FOR FP16 TRAINING !!! ###
         #### IF WE SUM BEFORE WE DEVIDE OUR VALUES IT WILL GO TO INF ###
         ### DUE TO THE LOWER PRECISION!!! ###
-        nll = -log_softmax[xp.arange(flattened_dim), targets_data] / flattened_dim 
-        loss_value = xp.sum(nll)
+        nll = -log_softmax[np.arange(flattened_dim), targets_data] / flattened_dim 
+        loss_value = np.sum(nll)
   
         def _cross_entropy_backward(grad_output):
-    
+        
             if logits.requires_grad:
+
                 # Softmax probabilities
-                grad_input = xp.exp(log_softmax)  # shape (B, C)
-                grad_input[xp.arange(flattened_dim), targets_data] -= 1
+                grad_input = np.exp(log_softmax)  # shape (B, C)
+                grad_input[np.arange(flattened_dim), targets_data] -= 1
                 grad_input *= grad_output / flattened_dim  # scale by grad_output / batch_size
                 grad_input = grad_input.reshape(logits.shape)
 
@@ -1854,14 +1930,12 @@ def cross_entropy(logits, targets, auto=False):
                     logits.grad = grad_input
                 else:
                     logits.grad += grad_input
-                    
+
         requires_grad = logits.requires_grad
-        out = Tensor(
-            xp.array(loss_value, dtype=logits.dtype),
-            requires_grad=requires_grad,
-            grad_fn=_cross_entropy_backward if requires_grad else None,
-            grad_fn_name="<CrossEntropyBackward>" if requires_grad else None
-        )
+        out = Tensor(loss_value,
+                     requires_grad=requires_grad,
+                     grad_fn=_cross_entropy_backward if requires_grad else None,
+                     grad_fn_name="<CrossEntropyBackward>" if requires_grad else None)
 
         # Add child for autograd
         if requires_grad:

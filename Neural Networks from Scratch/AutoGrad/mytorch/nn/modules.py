@@ -329,7 +329,7 @@ class Embedding(Module):
         self.embedding_dim = embedding_dim
 
         limit = 1.0 / np.sqrt(embedding_dim)
-        self.weight = zeros((num_embeddings, embedding_dim))
+        self.weight = zeros((num_embeddings, embedding_dim), requires_grad=True)
         init.uniform_(self.weight, -limit, limit)
 
     def __call__(self, indices):
@@ -752,12 +752,13 @@ class GELU(Module):
         return F.gelu(x)
 
 class Softmax(Module):
-    def __init__(self, auto=False):
+    def __init__(self, auto=False, fused=True):
         super().__init__()
         self.auto = auto
+        self.fused = fused
 
     def forward(self, x, dim):
-        return F.softmax(x, dim=dim, auto=self.auto)
+        return F.softmax(x, dim=dim, auto=self.auto, fused=self.fused)
     
 ######################
 ### LOSS FUNCTIONS ###
