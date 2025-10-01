@@ -174,7 +174,7 @@ class Accelerator:
             for param in self.model.parameters():
 
                 ### Store a Copy of Full Precision Weights ###
-                fp32_param = mytorch.Tensor(param.data._array.copy().astype("float32"))
+                fp32_param = mytorch.Tensor(param.data._array.copy(), dtype=mytorch.float32)
                 fp32_param.requires_grad = param.requires_grad
                 self.fp32_params.append(fp32_param)
 
@@ -374,7 +374,16 @@ class Accelerator:
                 for param in self.model.parameters():
                     if hasattr(param, "grad") and param.grad is not None:
                         out = cp.empty_like(param.grad)
-                        self.comm.all_reduce(param.grad, out, op="sum")
+
+                        ### Quick check. In our backward pass there are two options:
+                        ### - Auto backward which will use our Array type
+                        ### - Manual backward which will use either cp.ndarray or np.ndarray. But 
+                        ###   we are in distributed training here so we only care about cp.ndarray
+
+                        ### This means if we have an Array type we need to get the "_array" that hold the 
+                        ### actual underlying data in Cupy for NCCL all_reduce. But if its already a 
+                        ### cp.ndarray theres nothing to get, so we just have a quick sanity check here
+                        self.comm.all_reduce(param.grad._array if hasattr(param.grad, "_array") else param.grad, out, op="sum")
                         param.grad[:] = out / self.world_size
 
             ### Cast Grads back to FP32 to Update our FP32 Copy of Weights ###
@@ -425,9 +434,10 @@ class Accelerator:
 
         if self.world_size <= 1 or self.comm is None:
             return float(value.data._array[0])
-
-        out = cp.zeros_like(value.data._array)
-        self.comm.all_reduce(value.data._array, out, op="sum")
+        
+        data = value.data._array if hasattr(value.data, "_array") else value.data
+        out = cp.zeros_like(data)
+        self.comm.all_reduce(data, out, op="sum")
         return out.item() / self.world_size
     
     def wait_for_everyone(self):

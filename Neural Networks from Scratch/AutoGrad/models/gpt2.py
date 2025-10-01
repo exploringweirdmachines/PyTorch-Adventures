@@ -1,5 +1,4 @@
 import numpy as np
-import cupy as cp
 import mytorch
 import mytorch.nn as nn
 
@@ -30,59 +29,6 @@ class Embeddings(nn.Module):
         x = x + pos_embed
 
         return x
-    
-# class Attention(nn.Module):
-
-#     def __init__(self, embed_dim, num_heads, attn_dropout_p=0.1, use_bias=True):
-#         super().__init__()
-#         ### Sanity Checks ###
-#         assert embed_dim % num_heads == 0, "Double check embedding dim divisible by number of heads"
-
-#         ### Attention Head Dim ###
-#         self.embed_dim = embed_dim
-#         self.num_heads = num_heads
-#         self.head_dim = embed_dim // num_heads
-
-#         # ### Attention Projections ###
-#         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=False)
-#         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=False)
-#         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=False)
-#         self.softmax = nn.Softmax(auto=False)
-#         self.attn_drop = nn.Dropout(dropout_p=attn_dropout_p)
-
-#         ### Post Attention Projection ###
-#         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=False)
-#         self.proj_drop = nn.Dropout(dropout_p=attn_dropout_p)
-        
-
-#     def forward(self, x, attention_mask=None):
-        
-#         ### Store Shape ###
-#         batch, seq_len, embed_dim = x.shape
-
-#         # ### Compute Projections and make Contiguous ###
-#         q = self.q_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
-#         k = self.k_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
-#         v = self.v_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
-        
-#         ### Compute Attention (Attention Mask has shape Batch x Sequence len x Sequence len) ###
-#         scores = (q @ k.transpose(-2, -1)) / self.head_dim**0.5
-        
-#         ### Add attention mask if it exists ###
-#         if attention_mask is not None:
-#             scores = scores + attention_mask.astype(scores.data.dtype)
-  
-#         attention = self.softmax(scores, dim=-1)
-#         attention = self.attn_drop(attention)
-
-#         output = attention @ v
-#         output = output.transpose(1,2).reshape(batch,seq_len,embed_dim)
-        
-#         ### Compute Output Projection (on flattened dimension) ###
-#         output = self.out_proj(output)
-#         output = self.proj_drop(output)
-
-#         return output
 
 class Attention(nn.Module):
 
@@ -119,7 +65,7 @@ class Attention(nn.Module):
         qkv = qkv.transpose(1, 2)
 
         # Chunk last dim into q, k, v
-        q, k, v = qkv.chunk(3, dim=-1)  # each [batch, num_heads, seq_len, head_dim]
+        q, k, v = mytorch.chunk(qkv, 3, dim=-1)  # each [batch, num_heads, seq_len, head_dim]
 
         # Compute attention scores
         scores = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
