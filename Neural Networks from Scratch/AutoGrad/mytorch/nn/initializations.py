@@ -71,12 +71,6 @@ def kaiming_uniform_(tensor, a=0, mode="fan_in", nonlinearity="leaky_relu"):
     bound = math.sqrt(3.0) * gain / math.sqrt(fan)
     uniform_(tensor, -bound, bound)
 
-def kaiming_normal_(tensor, a=0, mode="fan_in", nonlinearity="leaky_relu"):
-    fan = _calculate_fan(tensor.shape, mode)
-    gain = calculate_gain(nonlinearity, a)
-    std = gain / math.sqrt(fan)
-    normal_(tensor, 0.0, std)
-
 def _calculate_fan_in_out(shape):
     if len(shape) == 2:  # linear layer weight
         fan_in, fan_out = shape[1], shape[0]

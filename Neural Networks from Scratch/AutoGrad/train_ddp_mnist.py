@@ -17,12 +17,11 @@ args = parser.parse_args()
 ########################
 ### LOAD ACCELERATOR ###
 ########################
-accelerator = Accelerator()
+accelerator = Accelerator(mixed_precision=True)
 
 ####################
 ### DEFINE MODEL ###
 ####################
-
 class MyTorchMNIST(nn.Module):
     def __init__(self):
         super().__init__()
@@ -37,6 +36,7 @@ class MyTorchMNIST(nn.Module):
         self.activation = nn.ReLU()
 
     def forward(self, x):
+        
         x = self.drop1(self.activation(self.fc1(x)))
         x = self.drop2(self.activation(self.fc2(x)))
         x = self.drop3(self.activation(self.fc3(x)))
@@ -59,7 +59,7 @@ train = MNIST("../../data", train=True, download=False)
 test = MNIST("../../data", train=False, download=False)
 
 def collate_fn(batch):
-    images = np.concatenate([np.array(i[0]).astype(np.float32).reshape(1,784) for i in batch]) / 255
+    images = np.concatenate([np.array(i[0]).astype(np.float16).reshape(1,784) for i in batch]) / 255
     labels = np.array([i[1] for i in batch])
     return images, labels
 
@@ -94,10 +94,10 @@ for epoch in range(NUM_EPOCHS):
 
     model.train()
     for images, labels in tqdm(trainloader, disable=not accelerator.is_main_process()):
-        
+
         ### Convert Numpy Arrays to CuPY Arrays on GPU ###
-        images = mytorch.Tensor(images)
-        labels = mytorch.Tensor(labels)
+        images = mytorch.Tensor(images).to(accelerator.device)
+        labels = mytorch.Tensor(labels).to(accelerator.device)
 
         # Forward 
         pred = model(images)
@@ -114,6 +114,8 @@ for epoch in range(NUM_EPOCHS):
         predicted = pred.argmax(dim=-1)
         accuracy = (predicted == labels).sum() / len(predicted)
 
+        loss_plot = accelerator.gather_for_metrics(loss)
+
         train_loss.append(accelerator.gather_for_metrics(loss))
         train_acc.append(accelerator.gather_for_metrics(accuracy))
 
@@ -121,8 +123,8 @@ for epoch in range(NUM_EPOCHS):
     for images, labels in tqdm(testloader):
         
         ### Convert Numpy Arrays to CuPY Arrays on GPU ###
-        images = mytorch.Tensor(images)
-        labels = mytorch.Tensor(labels)
+        images = mytorch.Tensor(images).to(accelerator.device)
+        labels = mytorch.Tensor(labels).to(accelerator.device)
 
         with mytorch.no_grad():
             ### Pass Through Model ###

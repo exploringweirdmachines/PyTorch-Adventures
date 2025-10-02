@@ -108,7 +108,8 @@ def generate_sample(model, tokenizer, starting_text, gen_len, context_length):
         return generated
 
 ### INIT ACCELERATOR ###
-accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps)
+accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps,
+                          mixed_precision=True)
 
 if args.log_wandb:
     training_config = {
@@ -163,7 +164,8 @@ model = GPT2(vocab_size=tokenizer.vocab_size,
              num_heads=args.num_heads, 
              num_blocks=args.num_blocks, 
              dropout_p=args.dropout_p, 
-             mlp_ratio=args.mlp_ratio)
+             mlp_ratio=args.mlp_ratio,
+             use_bias=False)
 
 accelerator.print(model)
 total_params = 0
@@ -194,7 +196,6 @@ model, optimizer = accelerator.prepare(model, optimizer)
 loss_fn = nn.CrossEntropyLoss()
 
 ### Train Model ###
-
 pbar = tqdm(range(args.train_iterations), disable=not accelerator.is_main_process())
 completed_steps = 0
 for iter in range(args.train_iterations * args.gradient_accumulation_steps):

@@ -55,6 +55,11 @@ class Tensor:
         """
         return self._data
     
+    @data.setter
+    def data(self, value):
+        self._data = ap.Array(value)
+        return self
+
     @property
     def dtype(self):
         return self._data.dtype
@@ -62,11 +67,6 @@ class Tensor:
     @property
     def device(self):
         return self._data.device
-    
-    @data.setter
-    def data(self, value):
-        self._data = ap.Array(value)
-        return self
     
     @property
     def shape(self):
@@ -923,7 +923,7 @@ class Tensor:
             if self.requires_grad:
                 if self.grad is None:
                     self.grad = ap.Array.zeros_like(self.data, dtype=self.data.dtype)
-
+  
                 # Convert index to raw array if needed
                 actual_idx = idx
                 if isinstance(idx, Tensor):
@@ -1325,68 +1325,6 @@ class Tensor:
             out._add_parents(self)
 
         return out
-
-    def chunk(self, chunks, dim=0):
-        """
-        Split a tensor into `chunks` along dimension `dim`.
-        Returns a list of Tensors.
-
-        to make this easy we use slices
-
-        a = ["a", "b", "c", "d", "e", "f", "g"]
-        a[1:3] = ["b", "c", "d"]
-        a[slice(1,3)] = ["b", "c", "d"]
-        """
-        size = self.shape[dim]
-        if size % chunks != 0:
-            raise ValueError(f"Cannot split dimension {dim} of size {size} into {chunks} equal chunks")
-        
-        chunk_size = size // chunks
-        out_tensors = []
-
-        for i in range(chunks):
-            start, end = i * chunk_size, (i + 1) * chunk_size
-
-            # Slice the underlying array directly
-            idx = [slice(None)] * self.ndim
-            idx[dim] = slice(start, end)
-            slice_data = self.data[tuple(idx)]
-
-            def _chunk_backward(input_grad, start=start, end=end):
-                if self.requires_grad:
-                    grad = self.xp.zeros_like(self.data, dtype=self.data.dtype)
-                    
-                    # Ensure input_grad has the correct shape
-                    grad_slice_shape = list(grad.shape)
-                    grad_slice_shape[dim] = end - start
-                    grad_slice = input_grad.reshape(grad_slice_shape)
-
-                    # Insert gradient slice into the right position
-                    grad_idx = [slice(None)] * grad.ndim
-                    grad_idx[dim] = slice(start, end)
-                    grad[tuple(grad_idx)] = grad_slice
-
-                    # Accumulate gradients
-                    if self.grad is None:
-                        self.grad = grad
-                    else:
-                        self.grad += grad
-
-            requires_grad = self.requires_grad and Tensor.build_graph_enabled()
-            out = Tensor(
-                slice_data,
-                requires_grad=requires_grad,
-                grad_fn=_chunk_backward if requires_grad else None,
-                grad_fn_name="<ChunkBackward>" if requires_grad else None,
-                device=self.device
-            )
-
-            if requires_grad:
-                out._add_parents(self)
-
-            out_tensors.append(out)
-
-        return out_tensors
 
     def _add_parents(self, *parents):
         """
