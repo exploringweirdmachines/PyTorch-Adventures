@@ -1,7 +1,6 @@
 import os
 import argparse
 import numpy as np
-import cupy as cp
 import requests
 import mytorch
 import mytorch.nn as nn
@@ -9,7 +8,7 @@ import mytorch.optim as optim
 from models.gpt2 import GPT2
 from tqdm import tqdm
 
-from transformers import GPT2TokenizerFast
+# from transformers import GPT2TokenizerFast
 import wandb
 
 def main(args):
@@ -99,8 +98,8 @@ def main(args):
     ### Tokenize Text ###
     if USE_GPT2_TOKENIZER:
         print("Using GPT2 Tokenizer")
-        tokenizer = GPT2TokenizerFast.from_pretrained("openai-community/gpt2")
-        tokens = cp.array(tokenizer.encode(all_text))
+        # tokenizer = GPT2TokenizerFast.from_pretrained("openai-community/gpt2")
+        tokens = np.array(tokenizer.encode(all_text))
     else:
         print("Training Character Level Model")
         chars = sorted(list(set(all_text)))
@@ -120,13 +119,13 @@ def main(args):
                 return "".join([self.idx2char[i] for i in input])
         
         tokenizer = Tokenizer(char_to_idx, idx_to_char)
-        tokens = cp.array(tokenizer.encode(all_text))
+        tokens = np.array(tokenizer.encode(all_text))
 
     ### Grab Batches from Dataset ###
     def get_batch(data, batch_size, seq_len):
-        idx = cp.random.randint(0, len(data) - seq_len - 1, batch_size)
-        inputs = cp.stack([data[i:i+seq_len] for i in idx])
-        targets = cp.stack([data[i+1:i+seq_len+1] for i in idx])
+        idx = np.random.randint(0, len(data) - seq_len - 1, batch_size)
+        inputs = np.stack([data[i:i+seq_len] for i in idx])
+        targets = np.stack([data[i+1:i+seq_len+1] for i in idx])
         return mytorch.Tensor(inputs), mytorch.Tensor(targets)
 
     ### Load Model ###
@@ -139,6 +138,7 @@ def main(args):
                 mlp_ratio=MLP_RATIO,
                 use_bias=USE_BIAS)
 
+    model = model.to("cuda")
 
     total_params = 0
     for param in model.parameters():
@@ -148,8 +148,8 @@ def main(args):
 
     ### Load Causal Mask for Training ###
     causal_mask = mytorch.Tensor(
-        cp.triu(cp.ones((1, 1, CONTEXT_LENGTH, CONTEXT_LENGTH)) * float('-inf'), k=1)
-    ).astype(cp.float32)
+        np.triu(np.ones((1, 1, CONTEXT_LENGTH, CONTEXT_LENGTH)) * float('-inf'), k=1)
+    ).astype("float32").to("cuda")
 
     ### Load Optimizer ###
     optimizer = optim.AdamW(model.parameters(), lr=MAX_LEARNING_RATE, weight_decay=WEIGHT_DECAY)
@@ -162,7 +162,7 @@ def main(args):
     )
 
     ### Load Loss Function ###
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss(auto=True)
 
     ### Train Model ###
     def train_step():
@@ -170,17 +170,19 @@ def main(args):
         for i in range(GRADIENT_ACCUMULATION_STEPS):
 
             inputs, targets = get_batch(tokens, BATCH_SIZE//GRADIENT_ACCUMULATION_STEPS, CONTEXT_LENGTH)
-        
+            inputs, targets = inputs.to("cuda"), targets.to("cuda")
+
             ### Compute Logits ###
             logits = model(inputs, causal_mask)
     
             ### Compute Loss ###
             loss = loss_fn(logits, targets) / GRADIENT_ACCUMULATION_STEPS
 
-            ### Compute Gradients ###
+            # ### Compute Gradients ###
             loss.backward()
-        
-        ### Clip Gradients ###
+
+
+        # ### Clip Gradients ###
         mytorch.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
 
         ### Update Model ###
@@ -202,24 +204,25 @@ def main(args):
 
                 # Limit context to last seq_len tokens
                 context = generated[-CONTEXT_LENGTH:]
-                context_tensor = mytorch.Tensor(cp.array([context], dtype=cp.int32))
+                context_tensor = mytorch.Tensor(np.array([context], dtype=np.int32)).to("cuda")
 
                 # Current context length
                 curr_len = context_tensor.shape[1]
 
                 # Create causal mask (upper-triangular with -inf)
                 causal_mask_data = mytorch.Tensor(
-                    cp.triu(cp.ones((curr_len, curr_len), dtype=cp.float32) * float('-inf'), k=1)
-                )
+                    np.triu(np.ones((curr_len, curr_len), dtype=np.float32) * float('-inf'), k=1)
+                ).to("cuda")
 
                 # Forward pass
                 logits = model(context_tensor, causal_mask_data)
                 last_logits = logits.data[0, -1]  # logits for last position
-
+           
                 # Softmax + sample
-                exp_logits = cp.exp(last_logits - cp.max(last_logits))
-                probs = (exp_logits / cp.sum(exp_logits))# move to CPU
-                next_token = cp.random.choice(tokenizer.vocab_size, p=probs, size=(1,)).get()[0]
+                exp_logits = np.exp(last_logits - np.max(last_logits))
+                probs = (exp_logits / np.sum(exp_logits))
+
+                next_token = np.random.choice(tokenizer.vocab_size, p=probs.get(), size=(1,))[0]
 
                 # Append generated token
                 generated.append(next_token)
@@ -233,8 +236,9 @@ def main(args):
         return generated
 
     for iter in tqdm(range(TRAINING_ITERATIONS)):
-
+ 
         logits, targets, loss = train_step()
+        
         
         if iter % LOG_ITER == 0:
             preds = logits.argmax(dim=-1).reshape(-1)
@@ -252,9 +256,9 @@ def main(args):
             generate_sample()
             model.train()
         
-    ### Save Model ###
-    print(f"Saving Weights to {SAVE_PATH}")
-    mytorch.save(model.state_dict(), SAVE_PATH)
+    # ### Save Model ###
+    # print(f"Saving Weights to {SAVE_PATH}")
+    # mytorch.save(model.state_dict(), SAVE_PATH)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Tiny GPT2 with MyTorch")
