@@ -1400,7 +1400,7 @@ def dropout(input, dropout_p, training=True, auto=False):
 
         return out
    
-def layernorm(input, weight, bias, eps=1e-5, auto=False):
+def layernorm(input, weight, bias, eps=1e-5, training=True, auto=False, fused=True):
 
     """
     Standard LayerNorm op with input of the shape (*, E)
@@ -1422,7 +1422,7 @@ def layernorm(input, weight, bias, eps=1e-5, auto=False):
         if reshaped:
             input = input.reshape(-1, embed_dim)
         
-        var_x = (input.var(dim=-1, keepdims=True) + eps)#.astype(xp.float32)
+        var_x = (input.var(dim=-1, keepdims=True) + eps)
         norm_x = (input - input.mean(dim=-1, keepdims=True)) / var_x**0.5
         scale_shifted_x = norm_x * weight.reshape(1,-1) 
         
@@ -1436,68 +1436,154 @@ def layernorm(input, weight, bias, eps=1e-5, auto=False):
 
     else:
 
-        input_cp = input.data
-        gamma_cp = weight.data
+        if not fused:
+            input_cp = input.data
+            gamma_cp = weight.data
 
-        if bias is not None:
-            beta_cp = bias.data
+            if bias is not None:
+                beta_cp = bias.data
 
-        if reshaped:
-            input_cp = input_cp.reshape(-1, embed_dim)
-        
-        ### Compute Mean and Var Along Last Dimension ###
-        mean = np.mean(input_cp, axis=-1, keepdims=True)
-        var = np.var(input_cp, axis=-1, keepdims=True)
-        inv_std = np.reciprocal(np.sqrt(var + eps))
-
-        output = np.empty_like(input_cp)
-        norm_x = np.subtract(input_cp, mean, out=output)
-        np.multiply(output, inv_std, out=output)
-        np.multiply(output, gamma_cp.reshape(1,-1), out=output)
-        if bias is not None:
-            np.add(output, beta_cp.reshape(1,-1), out=output)
-
-        ### Reshape Back if Needed ###
-        output = output.reshape(*dims, embed_dim)
-
-        def _layernorm_backward(grad_output):
-            
-            ### Reshape Grad Output as its currently (*, I) ###
             if reshaped:
-                grad_output = grad_output.reshape(-1, embed_dim)
+                input_cp = input_cp.reshape(-1, embed_dim)
+            
+            ### Compute Mean and Var Along Last Dimension ###
+            mean = np.mean(input_cp, axis=-1, keepdims=True)
+            var = np.var(input_cp, axis=-1, keepdims=True)
+            inv_std = np.reciprocal(np.sqrt(var + eps))
 
-            if weight.requires_grad:
-                grad_gamma = np.sum(grad_output * norm_x, axis=0)
+            ### Store copy of x_hat for the input backward ###
+            x_hat = (input_cp - mean) * inv_std
+            
+            output = np.empty_like(x_hat)
+            np.multiply(x_hat, gamma_cp.reshape(1,-1), out=output)
+            if bias is not None:
+                np.add(output, beta_cp.reshape(1,-1), out=output)
+
+            ### Reshape Back if Needed ###
+            output = output.reshape(*dims, embed_dim)
+
+            def _layernorm_backward(grad_output):
+                
+                ### Reshape Grad Output as its currently (*, I) ###
+                if reshaped:
+                    grad_output = grad_output.reshape(-1, embed_dim)
+
+                if weight.requires_grad:
+                    # y = x_hat * gamma + beta
+                    # dL/dgamma = dL/dy * dy/dgamma = grad_output * x_hat
+                    # sum up grads over the batch dim
+                    grad_gamma = np.sum(grad_output * x_hat, axis=0)
+
+                    if weight.grad is None:
+                        weight.grad = grad_gamma
+                    else:
+                        weight.grad += grad_gamma
+                
+                if bias is not None:
+                    if bias.requires_grad:
+                        # y = x_hat * gamma + beta
+                        # dL/dbeta = dL/dy * dy/dbeta = grad_output * 1
+                        # sum up grads over the batch dim
+                        grad_beta = np.sum(grad_output, axis=0)
+                        
+                        if bias.grad is None:
+                            bias.grad = grad_beta
+                        else:
+                            bias.grad += grad_beta
+
+                if input.requires_grad:
+                    # y = x_hat * gamma + beta
+                    # where x_hat = (x - mu) / (var + eps)
+                    # dL/dx = dL/dy * dy/dx_hat * dx_hat / dx
+                    # = inv_std * (grad_output * gamma - mean(grad_output*gamma) - x_hat*mean(grad_output * gamma_cp * x_hat))
+                    # sum up grads over the batch dim
+                    dx_hat = grad_output * gamma_cp
+                    mean_dx_hat = np.mean(dx_hat, axis=-1, keepdims=True)
+                    mean_mean_dx_hat_x_hat = np.mean(dx_hat * x_hat, axis=-1, keepdims=True)
+                    grad_input = inv_std * (dx_hat - mean_dx_hat - x_hat * mean_mean_dx_hat_x_hat) 
+
+                    ### Put Back into Original Shape ###
+                    if reshaped:
+                        grad_input = grad_input.reshape(*dims, embed_dim)
+
+                    if input.grad is None:
+                        input.grad = grad_input
+                    else:
+                        input.grad += grad_input
+
+        else:
+
+            ### Fused ops need raw cupy arrays not Array ###
+            if hasattr(input.data, "_array"):
+                input_array = input.data._array
+            else:
+                input_array = input.data
+
+            if hasattr(weight.data, "_array"):
+                weight_array = weight.data._array
+            else:
+                weight_array = weight.data
+
+            if bias is not None:
+                if hasattr(bias.data, "_array"):
+                    bias_array = bias.data._array
+                else:
+                    bias_array = bias.data
+
+            ### Flatten Input Array ###
+            *dims, embed_dim = input_array.shape
+            flat_input_array = input_array.reshape(-1, embed_dim)
+
+            outputs = K.fused_layernorm_forward(flat_input_array,
+                                                gamma=weight_array, 
+                                                beta=bias_array if bias is not None else None, 
+                                                eps=eps, 
+                                                training=training)
+            
+            ### during training we return intermediate tensors ###
+            if training:
+                output_flat, x_hat, inv_var = outputs
+            else:
+                output_flat = outputs
+
+            ### Return y back to (B x S x E) ###
+            output = output_flat.reshape(*dims, -1)
+
+            def _layernorm_backward(grad_output):
+                
+                ### Reshape grad back to (*xE) ###
+                grad_flat = grad_output.reshape(-1, embed_dim)
+
+                grads = K.fused_layernorm_backward(x_hat=x_hat,
+                                                   inv_var=inv_var,
+                                                   dy=grad_flat,
+                                                   gamma=weight_array, 
+                                                   bias=True if bias is not None else False)
+    
+                if bias is not None:
+                    dx, dgamma, dbeta = grads
+                else:
+                    dx, dgamma = grads
+
+                ### Reshape dx back to original shape ###
+                dx = dx.reshape(*dims, -1)
+
+                ### Accumulate Grads ####
+                if input.grad is None:
+                    input.grad = dx
+                else:
+                    input.grad += dx
 
                 if weight.grad is None:
-                    weight.grad = grad_gamma
+                    weight.grad = dgamma
                 else:
-                    weight.grad += grad_gamma
-            
-            if bias is not None:
-                if bias.requires_grad:
-                    grad_beta = np.sum(grad_output, axis=0)
-                    
-                    if bias.grad is None:
-                        bias.grad = grad_beta
-                    else:
-                        bias.grad += grad_beta
-
-            if input.requires_grad:
+                    weight.grad += dgamma
                 
-                grad_norm = grad_output * gamma_cp
-                mean_grad = np.mean(grad_norm, axis=-1, keepdims=True)
-                mean_norm_grad = np.mean(grad_norm * norm_x, axis=-1, keepdims=True)
-                grad_input = (grad_norm - mean_grad - norm_x * mean_norm_grad) * inv_std 
-
-                ### Put Back into Original Shape ###
-                if reshaped:
-                    grad_input = grad_input.reshape(*dims, embed_dim)
-
-                if input.grad is None:
-                    input.grad = grad_input
-                else:
-                    input.grad += grad_input
+                if bias is not None:
+                    if bias.grad is None:
+                        bias.grad = dbeta
+                    else:
+                        bias.grad += dbeta
 
         requires_grad = input.requires_grad or weight.requires_grad or \
                             (bias is not None and bias.requires_grad)
@@ -1759,6 +1845,7 @@ def softmax(x, dim=-1, auto=False, fused=True):
                     else:
                         x.grad += grad_input
         else:
+
             ### Fused Ops Need Access to Raw Arrays and they must be on CUDA ###
             if hasattr(x.data, "_array"):
                 array = x.data._array
@@ -1856,13 +1943,14 @@ def softmax(x, dim=-1, auto=False, fused=True):
 
         return out
 
-def cross_entropy(logits, targets, auto=False):
+def cross_entropy(logits, targets, ignore_index=-100, auto=False):
 
     """
     Standard cross entropy loss between raw logits and targets
 
     logits: (* x num_classes)
     targets (*, )
+    ignore_index: If a label is -100 it wont contribute to the loss
     """
 
     ### Flatten Logits to be (*, num_classes) ###
@@ -1882,6 +1970,14 @@ def cross_entropy(logits, targets, auto=False):
         ### Flatten Targets ###
         targets = targets.reshape(flattened_dim)
 
+        ### Mask out our ignore index (-100 by default) ###
+        mask = (targets != ignore_index)
+        logits = logits[mask]
+        targets = targets[mask]
+
+        ### Get number of valid labels so we can compute the avg over them ###
+        valid_count = mask.sum()
+
         ### Stable Log-Softmax ###
         logits_shifted = logits - logits.max(dim=1, keepdims=True)
 
@@ -1892,7 +1988,7 @@ def cross_entropy(logits, targets, auto=False):
         log_softmax = logits_shifted - logsumexp
 
         ### Negative Log Likelihood For Correct Class ###
-        nll = -log_softmax[np.arange(flattened_dim), targets] / flattened_dim
+        nll = -log_softmax[np.arange(len(targets)), targets] / valid_count
 
         ### Mean Loss ###
         loss = nll.sum()
@@ -1904,6 +2000,11 @@ def cross_entropy(logits, targets, auto=False):
         logits_data = logits.data.reshape(flattened_dim, num_classes)
         targets_data = targets.data.reshape(flattened_dim)
 
+        mask = (targets_data != ignore_index)
+        logits_data = logits_data[mask]
+        targets_data = targets_data[mask]
+        valid_counts = mask.sum()
+
         ### Stable Softmax ###
         logits_shifted = logits_data - np.max(logits_data, axis=1, keepdims=True)
         logsumexp = np.log(np.sum(np.exp(logits_shifted), axis=1, keepdims=True))
@@ -1913,7 +2014,7 @@ def cross_entropy(logits, targets, auto=False):
         #### EXTREMELY IMPORTANT DETAIL FOR FP16 TRAINING !!! ###
         #### IF WE SUM BEFORE WE DEVIDE OUR VALUES IT WILL GO TO INF ###
         ### DUE TO THE LOWER PRECISION!!! ###
-        nll = -log_softmax[np.arange(flattened_dim), targets_data] / flattened_dim 
+        nll = -log_softmax[np.arange(len(targets_data)), targets_data] / valid_counts 
         loss_value = np.sum(nll)
   
         def _cross_entropy_backward(grad_output):

@@ -4,6 +4,7 @@ Inspired by https://github.com/lucidrains/triton-transformer/blob/main/triton_tr
 import cupy as cp
 import triton
 import triton.language as tl
+from .utils import calc_num_warps
 
 def naive_softmax(x):
    
@@ -22,17 +23,17 @@ def naive_softmax(x):
 
     return out
 
-def calc_num_warps(block_size):
-    """
-    Reasonable heuristic for our softmax
-    """
-    num_warps = 4
-    if block_size >= 2048:
-        num_warps = 8
-    if block_size >= 4096:
-        num_warps = 16
-    return num_warps
+### You can do autotuning or just provide a reasonable heuristic ###
+# def get_configs():
+#     return [
+#         triton.Config({}, num_warps=nw) # {} because we have no args to pass in here
+#         for nw in [4, 8, 16]
+#     ]
 
+# @triton.autotune(
+#     configs=get_configs(),
+#     key=['n_cols'],  # use embedding dim as key
+# )
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def softmax_kernel_forward(
@@ -309,6 +310,10 @@ def softmax_kernel_forward(
     output_ptrs = output_row_start_ptr + col_offsets
     tl.store(output_ptrs, softmax_output, mask=mask)
 
+# @triton.autotune(
+#     configs=get_configs(),
+#     key=['n_cols'],  # use embedding dim as key
+# )
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def softmax_kernel_backward(
@@ -397,7 +402,6 @@ def fused_softmax_forward(x):
     )
     return y
 
-
 def fused_softmax_backward(grad, s):
 
     n_rows, n_cols = grad.shape
@@ -485,17 +489,12 @@ if __name__ == "__main__":
         t_naive = (time.time() - t0) / n_trials
         flops_naive = flops / t_naive / 1e9
 
-        ### Triton PyTorch ###
-        torch.cuda.synchronize()
-        t0 = time.time()
-        for _ in range(n_trials):
-            y_triton_torch = fused_torch_softmax_forward(x_torch)
-        torch.cuda.synchronize()
-        t_triton_torch = (time.time() - t0) / n_trials
-        flops_triton_torch = flops / t_triton_torch / 1e9
 
-        ### Triton CuPy ###
+        ### Triton LayerNorm on CuPy ###
+        # Warmup: run once to JIT compile kernel and load it on GPU
+        _ = fused_softmax_forward(x_cupy)
         cp.cuda.runtime.deviceSynchronize()
+
         t0 = time.time()
         for _ in range(n_trials):
             y_triton_cupy = fused_softmax_forward(x_cupy)
@@ -505,12 +504,10 @@ if __name__ == "__main__":
 
         # Verify correctness
         max_diff_naive = cp.max(cp.abs(y_naive - cp.array(torch.softmax(x_torch, dim=-1).cpu().numpy()))).item()
-        max_diff_triton_torch = (y_triton_torch - torch.softmax(x_torch, dim=-1)).abs().max().item()
         max_diff_triton_cupy = cp.max(cp.abs(y_triton_cupy - cp.array(torch.softmax(x_torch, dim=-1).cpu().numpy()))).item()
 
         print(f"PyTorch softmax:   {t_pt*1000:.2f} ms, {flops_pt:.2f} GFLOP/s")
         print(f"Naive CuPy:        {t_naive*1000:.2f} ms, {flops_naive:.2f} GFLOP/s, max diff {max_diff_naive:.3e}")
-        print(f"Triton Torch:      {t_triton_torch*1000:.2f} ms, {flops_triton_torch:.2f} GFLOP/s, max diff {max_diff_triton_torch:.3e}")
         print(f"Triton CuPy:       {t_triton_cupy*1000:.2f} ms, {flops_triton_cupy:.2f} GFLOP/s, max diff {max_diff_triton_cupy:.3e}")
         print("-"*50)
 
@@ -518,7 +515,6 @@ if __name__ == "__main__":
             "M": M,
             "pt_time": t_pt*1000, "pt_flops": flops_pt,
             "naive_time": t_naive*1000, "naive_flops": flops_naive,
-            "triton_torch_time": t_triton_torch*1000, "triton_torch_flops": flops_triton_torch,
             "triton_cupy_time": t_triton_cupy*1000, "triton_cupy_flops": flops_triton_cupy,
         }
 
