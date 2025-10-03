@@ -1,2 +1,3 @@
 from .softmax import fused_softmax_forward, fused_softmax_backward
 from .layernorm import fused_layernorm_forward, fused_layernorm_backward
+from .cross_entropy import fused_cross_entropy_forward, fused_cross_entropy_backward

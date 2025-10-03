@@ -946,24 +946,31 @@ class Tensor:
 
         return out
     
-    def __eq__(self, other): # ==
-        return Tensor(self.data == (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+    def _compare(self, other, op):
+        if isinstance(other, Tensor):
+            other_data = other.data
+        else:
+            other_data = other
+        return Tensor(op(self.data, other_data), requires_grad=False)
 
-    def __ne__(self, other):  # !=
-        return ~(self == other)
+    def __eq__(self, other):
+        return self._compare(other, lambda a, b: a == b)
 
-    def __lt__(self, other):  # <
-        return Tensor(self.data < (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+    def __ne__(self, other):
+        return self._compare(other, lambda a, b: a != b)
 
-    def __le__(self, other):  # <=
-        return Tensor(self.data <= (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+    def __lt__(self, other):
+        return self._compare(other, lambda a, b: a < b)
 
-    def __gt__(self, other):  # >
-        return Tensor(self.data > (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+    def __le__(self, other):
+        return self._compare(other, lambda a, b: a <= b)
 
-    def __ge__(self, other):  # >=
-        return Tensor(self.data >= (other.data if isinstance(other, Tensor) else other), requires_grad=False)
+    def __gt__(self, other):
+        return self._compare(other, lambda a, b: a > b)
 
+    def __ge__(self, other):
+        return self._compare(other, lambda a, b: a >= b)
+    
     def __len__(self):
         return self.shape[0]
     
@@ -1051,6 +1058,81 @@ class Tensor:
             grad_fn=_reshape_backward if requires_grad else None,
             grad_fn_name="<ReshapeBackward>" if requires_grad else None,
             device=self.device
+        )
+
+        if requires_grad:
+            out._add_parents(self)
+
+        return out
+    
+    def unsqueeze(self, dim=0):
+  
+        out_data = self.xp.expand_dims(self.data, axis=dim)
+
+        def _unsqueeze_backward(out_grad):
+            if self.requires_grad:
+                
+                ### Accumulate all grads along the dimension we added ###
+                grad = out_grad.sum(axis=dim)
+
+                if self.grad is None:
+                    self.grad = grad
+                else:
+                    self.grad += grad
+
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+        
+        out = Tensor(
+            out_data,
+            requires_grad=requires_grad,
+            grad_fn=_unsqueeze_backward if requires_grad else None,
+            grad_fn_name="<UnsqueezeBackward>" if requires_grad else None,
+            device=self.device,
+        )
+
+        if requires_grad:
+            out._add_parents(self)
+
+        return out
+    
+    def squeeze(self, dim=None):
+
+        shape = list(self.shape)
+
+        if dim is None:
+            # Drop all size-1 dimensions
+            out_shape = [s for s in shape if s != 1]
+        else:
+            if shape[dim] != 1:
+                raise ValueError(f"Cannot squeeze dimension {dim} of size {shape[dim]}")
+            out_shape = shape[:dim] + shape[dim+1:]
+
+        out_data = self.data.reshape(out_shape)
+
+        def _squeeze_backward(out_grad):
+            if self.requires_grad:
+                if dim is None:
+                    # Put all size-1 dims back
+                    grad = out_grad.reshape(shape)
+                else:
+                    # Only reinsert the squeezed dimension
+                    grad = self.xp.expand_dims(out_grad, axis=dim)
+
+                grad = grad.astype(self.data.dtype, copy=False)
+
+                if self.grad is None:
+                    self.grad = grad
+                else:
+                    self.grad += grad
+
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+
+        out = Tensor(
+            out_data,
+            requires_grad=requires_grad,
+            grad_fn=_squeeze_backward if requires_grad else None,
+            grad_fn_name="<SqueezeBackward>" if requires_grad else None,
+            device=self.device,
         )
 
         if requires_grad:
@@ -1319,6 +1401,38 @@ class Tensor:
             grad_fn=_argmax_backward if requires_grad else None,
             grad_fn_name="<ArgmaxBackward>" if requires_grad else None,
             device=self.device
+        )
+
+        if requires_grad:
+            out._add_parents(self)
+
+        return out
+    
+    def masked_fill(self, mask, value):
+
+        xp = self.xp
+        device = self.device
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+
+        # forward
+        out_data = xp.where(mask, value, self.data)
+
+        def _masked_fill_backward(out_grad):
+            if self.requires_grad:
+                # Only pass gradient where mask == False
+                grad = xp.where(mask, xp.array(0, dtype=out_grad.dtype), out_grad)
+
+                if self.grad is None:
+                    self.grad = grad
+                else:
+                    self.grad += grad
+
+        out = Tensor(
+            out_data,
+            requires_grad=requires_grad,
+            grad_fn=_masked_fill_backward if requires_grad else None,
+            grad_fn_name="<MaskedFillBackward>" if requires_grad else None,
+            device=device,
         )
 
         if requires_grad:

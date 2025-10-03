@@ -1943,7 +1943,7 @@ def softmax(x, dim=-1, auto=False, fused=True):
 
         return out
 
-def cross_entropy(logits, targets, ignore_index=-100, auto=False):
+def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
 
     """
     Standard cross entropy loss between raw logits and targets
@@ -1996,49 +1996,101 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False):
         return loss
     
     else:
+
+        if not fused:
+            # Our Logits will be some (N x NUM_CLASSES)
+            # Our Targets will be some (N, ) where each value in the target 
+            # is between 0 and NUM_CLASSES-1
+
+            # Cross Entropy Formula w. Softmax together was just:
+
+            # CE = log(sum(e^x)) = x_{correct}
+
+            # And we know the index of correct, its just our label the cooresponding labels. 
+            # So lets just write a kernel that processes one row at a time. We will grab the 
+            # NUM_CLASSES length vector of logits and the single label 
+            
+            logits_data = logits.data.reshape(flattened_dim, num_classes)
+            targets_data = targets.data.reshape(flattened_dim)
+
+            logits_data = logits.xp.ascontiguousarray(logits_data, dtype=logits.dtype)
+
+            mask = (targets_data != ignore_index)
+            valid_counts = mask.sum()
+
+            # Stable logsumexp per row
+            logits_max = np.max(logits_data, axis=1, keepdims=True)
+            exp_shifted = np.exp(logits_data - logits_max)  # shape (B, C)
+            logsumexp = np.log(np.sum(exp_shifted, axis=1, keepdims=True)) + logits_max  # shape (B, 1)
+
+            # Negative log-likelihood only for valid rows
+            nll = (logsumexp.flatten() - logits_data[np.arange(flattened_dim), targets_data]) * mask
+            loss_value = np.sum(nll) / valid_counts
+
+            def _cross_entropy_backward(grad_output):
+                if logits.requires_grad:
+                    # Compute softmax probabilities for all rows
+                    softmax = exp_shifted / np.sum(exp_shifted, axis=1, keepdims=True)  # shape (B, C)
+                    
+                    # Initialize gradient
+                    grad_input = softmax.copy()
+                    grad_input[np.arange(flattened_dim), targets_data] -= 1  # softmax - one_hot
+
+                    # Scale by grad_output and divide by valid counts
+                    grad_input *= (grad_output / valid_counts)
+                    
+                    # Zero out ignored rows
+                    grad_input *= mask.reshape(-1,1)
+
+                    # Reshape back to original logits shape
+                    grad_input = grad_input.reshape(logits.shape)
+
+                    if logits.grad is None:
+                        logits.grad = grad_input
+                    else:
+                        logits.grad += grad_input
         
-        logits_data = logits.data.reshape(flattened_dim, num_classes)
-        targets_data = targets.data.reshape(flattened_dim)
+        else:
+            
+            ### Fused Op only happens in float32 ###
+            logits_data = logits.data.reshape(flattened_dim, num_classes).astype("float32")
+            targets_data = targets.data.reshape(flattened_dim).astype("int64")
 
-        mask = (targets_data != ignore_index)
-        logits_data = logits_data[mask]
-        targets_data = targets_data[mask]
-        valid_counts = mask.sum()
+            targets_flat = targets_data
+            mask = (targets_flat != ignore_index)
+            valid_count = mask.sum()
 
-        ### Stable Softmax ###
-        logits_shifted = logits_data - np.max(logits_data, axis=1, keepdims=True)
-        logsumexp = np.log(np.sum(np.exp(logits_shifted), axis=1, keepdims=True))
-        log_softmax = logits_shifted - logsumexp
-        
-        # Negative log-likelihood
-        #### EXTREMELY IMPORTANT DETAIL FOR FP16 TRAINING !!! ###
-        #### IF WE SUM BEFORE WE DEVIDE OUR VALUES IT WILL GO TO INF ###
-        ### DUE TO THE LOWER PRECISION!!! ###
-        nll = -log_softmax[np.arange(len(targets_data)), targets_data] / valid_counts 
-        loss_value = np.sum(nll)
-  
-        def _cross_entropy_backward(grad_output):
-        
-            if logits.requires_grad:
+            # Triton kernel forward
+            loss_cp, logsumexp_cp = K.fused_cross_entropy_forward(logits_data, targets_data)
+            loss_value = loss_cp.sum() / valid_count
 
-                # Softmax probabilities
-                grad_input = np.exp(log_softmax)  # shape (B, C)
-                grad_input[np.arange(flattened_dim), targets_data] -= 1
-                grad_input *= grad_output / flattened_dim  # scale by grad_output / batch_size
-                grad_input = grad_input.reshape(logits.shape)
+            def _cross_entropy_backward(grad_output):
 
-                if logits.grad is None:
-                    logits.grad = grad_input
-                else:
-                    logits.grad += grad_input
+                ### The loss is the last thing in our model ###
+                ### so our upstream grad is just a bunch of ones so nothing ###
+                ### to really use here! ###
+                if logits.requires_grad:
+                    grad_cp = K.fused_cross_entropy_backward(
+                        logits_data,
+                        targets_data,
+                        logsumexp_cp
+                    )
+                    # Reshape back to original logits shape
+                    grad_input = grad_cp.reshape(*logits.shape).astype(logits.dtype)
+                    
+                    if logits.grad is None:
+                        logits.grad = grad_input
+                    else:
+                        logits.grad += grad_input
 
         requires_grad = logits.requires_grad
-        out = Tensor(loss_value,
-                     requires_grad=requires_grad,
-                     grad_fn=_cross_entropy_backward if requires_grad else None,
-                     grad_fn_name="<CrossEntropyBackward>" if requires_grad else None)
+        out = Tensor(
+            loss_value,
+            requires_grad=requires_grad,
+            grad_fn=_cross_entropy_backward if requires_grad else None,
+            grad_fn_name="<CrossEntropyBackward>" if requires_grad else None
+        )
 
-        # Add child for autograd
         if requires_grad:
             out._add_parents(logits)
 
