@@ -1,6 +1,7 @@
 import numpy as np
 import mytorch
 import mytorch.nn as nn
+import mytorch.nn.functional as F
 
 class Embeddings(nn.Module):
 
@@ -67,19 +68,20 @@ class Attention(nn.Module):
         # Chunk last dim into q, k, v
         q, k, v = mytorch.chunk(qkv, 3, dim=-1)  # each [batch, num_heads, seq_len, head_dim]
 
-        # Compute attention scores
-        scores = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        # # Compute attention scores
+        # scores = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
 
-        if attention_mask is not None:
-            scores = scores + attention_mask.astype(scores.data.dtype)
+        # if attention_mask is not None:
+        #     scores = scores + attention_mask.astype(scores.data.dtype)
 
-        attention = self.softmax(scores, dim=-1)
-        attention = self.attn_drop(attention)
+        # attention = self.softmax(scores, dim=-1)
+        # attention = self.attn_drop(attention)
 
-        # Attention output
-        output = attention @ v
+        # # Attention output
+        # output = attention @ v
+
+        output = F.scaled_dot_product_attention(q, k, v, causal=True)
         output = output.transpose(1, 2).reshape(batch, seq_len, embed_dim)
-
         # Output projection
         output = self.out_proj(output)
         output = self.proj_drop(output)
@@ -176,12 +178,16 @@ class GPT2(nn.Module):
             if "out_proj" in name:
                 mytorch.nn.init.normal_(param, mean=0.0, std=(0.02/np.sqrt(2 * num_blocks)))
 
+        self.lm_head.weight.data = self.embeddings.char_embeddings.weight.data
+
+
     def forward(self, x, attention_mask=None):
 
         x = self.embeddings(x)
-        
+
         for block in self.blocks:
             x = block(x, attention_mask)
+
         x = self.final_layer_norm(x)    
         x = self.lm_head(x)
 
