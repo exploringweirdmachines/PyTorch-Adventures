@@ -13,7 +13,7 @@ so they remain cpu/gpu agnostic
 """
 import numpy as np
 from ..tensor import Tensor
-from . import fused_ops as K
+from . import fused_ops as FO
 
 def linear(input, weight, bias=None, auto=False):
 
@@ -1534,11 +1534,11 @@ def layernorm(input, weight, bias, eps=1e-5, training=True, auto=False, fused=Tr
             *dims, embed_dim = input_array.shape
             flat_input_array = input_array.reshape(-1, embed_dim)
 
-            outputs = K.fused_layernorm_forward(flat_input_array,
-                                                gamma=weight_array, 
-                                                beta=bias_array if bias is not None else None, 
-                                                eps=eps, 
-                                                training=training)
+            outputs = FO.fused_layernorm_forward(flat_input_array,
+                                                 gamma=weight_array, 
+                                                 beta=bias_array if bias is not None else None, 
+                                                 eps=eps, 
+                                                 training=training)
             
             ### during training we return intermediate tensors ###
             if training:
@@ -1554,11 +1554,11 @@ def layernorm(input, weight, bias, eps=1e-5, training=True, auto=False, fused=Tr
                 ### Reshape grad back to (*xE) ###
                 grad_flat = grad_output.reshape(-1, embed_dim)
 
-                grads = K.fused_layernorm_backward(x_hat=x_hat,
-                                                   inv_var=inv_var,
-                                                   dy=grad_flat,
-                                                   gamma=weight_array, 
-                                                   bias=True if bias is not None else False)
+                grads = FO.fused_layernorm_backward(x_hat=x_hat,
+                                                    inv_var=inv_var,
+                                                    dy=grad_flat,
+                                                    gamma=weight_array, 
+                                                    bias=True if bias is not None else False)
     
                 if bias is not None:
                     dx, dgamma, dbeta = grads
@@ -1875,7 +1875,7 @@ def softmax(x, dim=-1, auto=False, fused=True):
             reshaped = array_perm.reshape(n_rows, n_cols)
             
             ### Fused Softmax ###
-            out_flat = K.fused_softmax_forward(reshaped)
+            out_flat = FO.fused_softmax_forward(reshaped)
 
             ### Reshape Back ###
             out_perm = out_flat.reshape(array_perm.shape)
@@ -1914,7 +1914,7 @@ def softmax(x, dim=-1, auto=False, fused=True):
                 out_flat = out_perm.reshape(n_rows, n_cols)
 
                 ### Fused Backward Op ###
-                grad_input_flat = K.fused_softmax_backward(grad_flat, out_flat)
+                grad_input_flat = FO.fused_softmax_backward(grad_flat, out_flat)
 
                 # Step 4: Reshape back
                 grad_input_perm = grad_input_flat.reshape(grad_perm.shape)
@@ -1929,16 +1929,17 @@ def softmax(x, dim=-1, auto=False, fused=True):
                     x.grad = grad_input
                 else:
                     x.grad += grad_input
-                 
+
+        requires_grad = x.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
             out_data,
-            requires_grad=x.requires_grad,
-            grad_fn=_softmax_backward,
-            grad_fn_name="<SoftmaxBackward>"
+            requires_grad=requires_grad,
+            grad_fn=_softmax_backward if requires_grad else None,
+            grad_fn_name="<SoftmaxBackward>" if requires_grad else None
         )
 
         # Add child to autograd graph
-        if x.requires_grad:
+        if requires_grad:
             out._add_parents(x)
 
         return out
@@ -2061,7 +2062,7 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
             valid_count = mask.sum()
 
             # Triton kernel forward
-            loss_cp, logsumexp_cp = K.fused_cross_entropy_forward(logits_data, targets_data)
+            loss_cp, logsumexp_cp = FO.fused_cross_entropy_forward(logits_data, targets_data)
             loss_value = loss_cp.sum() / valid_count
 
             def _cross_entropy_backward(grad_output):
@@ -2070,20 +2071,21 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
                 ### so our upstream grad is just a bunch of ones so nothing ###
                 ### to really use here! ###
                 if logits.requires_grad:
-                    grad_cp = K.fused_cross_entropy_backward(
+                    grad_cp = FO.fused_cross_entropy_backward(
                         logits_data,
                         targets_data,
                         logsumexp_cp
                     )
                     # Reshape back to original logits shape
                     grad_input = grad_cp.reshape(*logits.shape).astype(logits.dtype)
-                    
+ 
                     if logits.grad is None:
                         logits.grad = grad_input
                     else:
                         logits.grad += grad_input
 
         requires_grad = logits.requires_grad
+        requires_grad = requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
             loss_value,
             requires_grad=requires_grad,
@@ -2116,7 +2118,7 @@ def mse_loss(pred, labels, auto=False):
             else:
                 pred.grad += grad_input
         
-        requires_grad = pred.requires_grad
+        requires_grad = pred.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
             out_data,
             requires_grad=requires_grad,
@@ -2129,3 +2131,70 @@ def mse_loss(pred, labels, auto=False):
         
         return out
 
+def scaled_dot_product_attention(Q, K, V, causal=False, softmax_scale=None):
+    
+    Q_data = Q.data
+    K_data = K.data
+    V_data = V.data
+
+    ### If we are an Array drill down to ndarray ###
+    if hasattr(Q_data, "_array"):
+        Q_data = Q_data._array
+    if hasattr(K_data, "_array"):
+        K_data = K_data._array
+    if hasattr(V_data, "_array"):
+        V_data = V_data._array
+    
+    assert (
+        Q_data.shape == K_data.shape == V_data.shape
+    ), f"Shapes mismatch: Q={Q_data.shape}, K={K_data.shape}, V={V_data.shape}"
+    assert len(Q_data.shape) == 4, f"Expected 4D tensors, got {len(Q_data.shape)}D"
+
+    Q_data, K_data, V_data, attn_out, M = FO.fused_sdpa_forward(
+        Q_data, K_data, V_data, 
+        causal=causal, softmax_scale=softmax_scale
+    )
+
+    def _sdpa_backward(grad_output):
+  
+        dQ, dK, dV = FO.fused_sdpa_backward(grad_output, 
+                                            Q_data, K_data, V_data, 
+                                            attn_out, M, 
+                                            causal=causal,
+                                            softmax_scale=softmax_scale)
+
+        ### Cast grads back to original dtype ###
+        dQ = dQ.astype(Q.dtype)
+        dK = dK.astype(K.dtype)
+        dV = dV.astype(V.dtype)
+
+        if Q.grad is None:
+            Q.grad = dQ
+        else:
+            Q.grad += dQ
+
+        if K.grad is None:
+            K.grad = dK
+        else:
+            K.grad += dK
+
+        if V.grad is None:
+            V.grad = dV
+        else:
+            V.grad += dV
+
+    requires_grad = Q.requires_grad or K.requires_grad or V.requires_grad
+    requires_grad = requires_grad and Tensor.build_graph_enabled()
+
+    out = Tensor(
+        attn_out,
+        requires_grad=requires_grad,
+        grad_fn=_sdpa_backward if requires_grad else None,
+        grad_fn_name="<SDPABackward>" if requires_grad else None,
+        dtype=Q.dtype
+    )
+    
+    if requires_grad:
+        out._add_parents(Q, K, V)
+
+    return out
