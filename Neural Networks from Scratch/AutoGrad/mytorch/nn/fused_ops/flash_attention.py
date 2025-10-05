@@ -7,11 +7,17 @@ https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html#s
 
 This adapts the existing code with Cupy!
 
+SOME SUPER CAVEATS THOUGH!!! This code lacks some critical features, but for now its probably fine:
+
+1) SEQ_LENS have to be atleast 128 (but why bother with all this for short sequences?)
+2) SEQ_LENS must be a power of 2 (this is fine for pretraining, but finetuning would require max padding)
+3) NO Support for attention masks. This does CAUSAL or Not Causal. Custom masks are not supported (YET?)
+4) NO Dropout on our attention scores! Maybe another feature to come?
+
 """
 import triton
 import triton.language as tl
 import cupy as cp
-
 
 @triton.jit
 def _attn_fwd_inner(
@@ -52,7 +58,6 @@ def _attn_fwd_inner(
         ### looking at k/v that are <= in index 
 
         lo, hi = 0, block_index_q * BLOCK_SIZE_Q
-        
     elif STAGE == 2:
         ### On the diagonal, we have another condition to handle:
         ### Lets say we grab the top left corner (qk00) and each block is processing 
@@ -167,10 +172,10 @@ def _attn_fwd_inner(
             num_stages=num_stages,
             num_warps=num_warps,
         )
-        for BLOCK_SIZE_Q in [16]
-        for BLOCK_SIZE_KV in [16]
-        for num_stages in ([3])
-        for num_warps in [2]
+        for BLOCK_SIZE_Q in [64, 128]
+        for BLOCK_SIZE_KV in [32, 64, 128]
+        for num_stages in ([2, 3, 4])
+        for num_warps in [4, 8, 16]
     ],
     key=["SEQ_LEN", "HEAD_DIM"],
 )
@@ -186,19 +191,12 @@ def _attn_fwd(
     stride_Q_head,
     stride_Q_seq,
     stride_Q_dim,
-    stride_K_batch,
-    stride_K_head,
     stride_K_seq,
     stride_K_dim,
-    stride_V_batch,
-    stride_V_head,
     stride_V_seq,
     stride_V_dim,
-    stride_O_batch,
-    stride_O_head,
     stride_O_seq,
     stride_O_dim,
-    BATCH_SIZE,
     NUM_HEADS: tl.constexpr,
     SEQ_LEN: tl.constexpr,
     HEAD_DIM: tl.constexpr,
@@ -364,6 +362,20 @@ def _attn_fwd(
     tl.store(m_ptrs, m_i)
     tl.store(O_block_ptr, O_block.to(O.type.element_ty))
 
+
+@triton.autotune(
+    [
+        triton.Config(
+            {"BLOCK_SIZE_Q": BLOCK_SIZE_Q},
+            num_stages=num_stages,
+            num_warps=num_warps,
+        )
+        for BLOCK_SIZE_Q in [64, 128]
+        for num_stages in ([2, 3, 4])
+        for num_warps in [4, 8, 16]
+    ],
+    key=["SEQ_LEN", "HEAD_DIM"],
+)
 @triton.jit
 def _attn_bwd_preprocess(
     O,
@@ -417,6 +429,20 @@ def _attn_bwd_preprocess(
     D_block_ptrs = D + index_batch_head * SEQ_LEN + offs_q
     tl.store(D_block_ptrs, D_block)
 
+@triton.autotune(
+    [
+        triton.Config(
+            {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
+            num_stages=num_stages,
+            num_warps=num_warps,
+        )
+        for BLOCK_SIZE_Q in [64, 128]
+        for BLOCK_SIZE_KV in [32, 64, 128]
+        for num_stages in ([2, 3, 4])
+        for num_warps in [4, 8, 16]
+    ],
+    key=["SEQ_LEN", "HEAD_DIM"],
+)
 @triton.jit
 def _attn_bwd_dq(
     Q,
@@ -435,8 +461,8 @@ def _attn_bwd_dq(
     stride_dim,
     NUM_HEADS,
     SEQ_LEN,
-    BLOCK_Q: tl.constexpr,
-    BLOCK_KV: tl.constexpr,
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_SIZE_KV: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     STAGE: tl.constexpr,
 ):  
@@ -479,11 +505,11 @@ def _attn_bwd_dq(
 
     index_block_kv = tl.program_id(0)
 
-    start_q = index_block_kv * BLOCK_Q
-    offs_q = start_q + tl.arange(0, BLOCK_Q)
+    start_q = index_block_kv * BLOCK_SIZE_Q
+    offs_q = start_q + tl.arange(0, BLOCK_SIZE_Q)
 
     Q_block = tl.load(Q + offs_q[:, None] * stride_seq + offs_dim[None, :] * stride_dim)
-    dQ_block = tl.zeros([BLOCK_Q, HEAD_DIM], dtype=tl.float32)
+    dQ_block = tl.zeros([BLOCK_SIZE_Q, HEAD_DIM], dtype=tl.float32)
     dO_block = tl.load(
         dO + offs_q[:, None] * stride_seq + offs_dim[None, :] * stride_dim
     )
@@ -491,7 +517,7 @@ def _attn_bwd_dq(
     M_block = tl.load(M + offs_q)
     M_block = M_block[:, None]
     
-    offs_kv = tl.arange(0, BLOCK_KV)
+    offs_kv = tl.arange(0, BLOCK_SIZE_KV)
 
     kT_ptrs = K + offs_kv[None, :] * stride_seq + offs_dim[:, None] * stride_dim
     vT_ptrs = V + offs_kv[None, :] * stride_seq + offs_dim[:, None] * stride_dim
@@ -499,7 +525,14 @@ def _attn_bwd_dq(
     Di = tl.load(D + offs_q)
 
     curr_kv = 0
-    num_steps = SEQ_LEN // BLOCK_KV
+    num_steps = SEQ_LEN // BLOCK_SIZE_KV
+    if STAGE == 3:
+        # For causal, limit the loop to only the relevant KV blocks 
+        # (up to the end of this Q block). Q cant attend to KV blocks 
+        # in the future so theres no need to loop through them
+        max_offs_q = start_q + BLOCK_SIZE_Q
+        num_steps = tl.cdiv(max_offs_q, BLOCK_SIZE_KV)
+
     for blk_idx in range(num_steps):
         K_T_block = tl.load(kT_ptrs)
         V_T_block = tl.load(vT_ptrs)
@@ -507,7 +540,7 @@ def _attn_bwd_dq(
         P_block = tl.math.exp2(QK_block - M_block)
 
         if STAGE == 3:
-            offs_kv = curr_kv + tl.arange(0, BLOCK_KV)
+            offs_kv = curr_kv + tl.arange(0, BLOCK_SIZE_KV)
             mask_block = offs_q[:, None] >= offs_kv[None, :]
             P_block = tl.where(mask_block, P_block, 0.0)
 
@@ -517,13 +550,27 @@ def _attn_bwd_dq(
         dS_block *= LN2
         dS_block = dS_block.to(tl.float16)
         dQ_block += softmax_scale * tl.dot(dS_block, tl.trans(K_T_block))
-        curr_kv += BLOCK_KV
-        kT_ptrs += BLOCK_KV * stride_seq
-        vT_ptrs += BLOCK_KV * stride_seq
+        curr_kv += BLOCK_SIZE_KV
+        kT_ptrs += BLOCK_SIZE_KV * stride_seq
+        vT_ptrs += BLOCK_SIZE_KV * stride_seq
 
     dQ_block_ptrs = dQ + offs_q[:, None] * stride_seq + offs_dim[None, :] * stride_dim
     tl.store(dQ_block_ptrs, dQ_block)
 
+@triton.autotune(
+    [
+        triton.Config(
+            {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
+            num_stages=num_stages,
+            num_warps=num_warps,
+        )
+        for BLOCK_SIZE_Q in [64, 128]
+        for BLOCK_SIZE_KV in [32, 64, 128]
+        for num_stages in ([2, 3, 4])
+        for num_warps in [4, 8, 16]
+    ],
+    key=["SEQ_LEN", "HEAD_DIM"],
+)
 @triton.jit
 def _attn_bwd_dk_dv(
     Q,
@@ -542,8 +589,8 @@ def _attn_bwd_dk_dv(
     stride_dim,
     NUM_HEADS,
     SEQ_LEN,
-    BLOCK_Q: tl.constexpr,
-    BLOCK_KV: tl.constexpr,
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_SIZE_KV: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     STAGE: tl.constexpr,
 ):
@@ -596,14 +643,14 @@ def _attn_bwd_dk_dv(
     index_block_kv = tl.program_id(0)
 
     ### get offset to the start of that block ###
-    start_kv = index_block_kv * BLOCK_KV
+    start_kv = index_block_kv * BLOCK_SIZE_KV
 
     ### Get all indexes for that block ###
-    offs_kv = start_kv + tl.arange(0, BLOCK_KV)
+    offs_kv = start_kv + tl.arange(0, BLOCK_SIZE_KV)
 
     ### initialize dV and dK for this block to accumulate into ###
-    dV_block = tl.zeros([BLOCK_KV, HEAD_DIM], dtype=tl.float32)
-    dK_block = tl.zeros([BLOCK_KV, HEAD_DIM], dtype=tl.float32)
+    dV_block = tl.zeros([BLOCK_SIZE_KV, HEAD_DIM], dtype=tl.float32)
+    dK_block = tl.zeros([BLOCK_SIZE_KV, HEAD_DIM], dtype=tl.float32)
 
     ### Now grab out K and V ###
     ### K and V have already been advanced to the correct Batch and Head. We just ###
@@ -618,7 +665,7 @@ def _attn_bwd_dk_dv(
 
     ### For each block of our k/v how many queries do we want to load? Lets ###
     ### make an offset for that! ###
-    offs_q = tl.arange(0, BLOCK_Q)
+    offs_q = tl.arange(0, BLOCK_SIZE_Q)
 
     ### Now a trick, we will access Q as a transposed array. This is because in our setup ###
     ### we treat queries as a column vector, but right now they are row vectors.
@@ -661,7 +708,34 @@ def _attn_bwd_dk_dv(
 
     ### Iterate over the sequence of dims ###
     curr_q = 0
-    num_steps = SEQ_LEN // BLOCK_Q
+    num_steps = SEQ_LEN // BLOCK_SIZE_Q
+    if STAGE == 3:
+
+        ### KV Can attend to any Q after it (as Q can only attend to stuff before it)
+        ### so if we are autoregressive, then dont bother attending to Q values
+        ### that are before these KVs, as that would mean the Q values are looking
+        ### into the future
+
+        ### Computes the earliest possible query position where the Q block could 
+        ### potentially contribute to the current KV block.
+        min_start_q = tl.maximum(0, start_kv - BLOCK_SIZE_Q + 1)
+
+        ### Get the index of the first block that contains that starting position
+        starting_block = tl.cdiv(min_start_q, BLOCK_SIZE_Q)
+
+        ### Get the starting query of the block. It may be earlier than 
+        ### our actual starting query, but we will mask any extra things later 
+        ### But we need to stay aligned to block boundaries
+        start_curr_q = starting_block * BLOCK_SIZE_Q
+
+        ### Update the number of steps we need to take 
+        num_steps = tl.cdiv(SEQ_LEN - start_curr_q, BLOCK_SIZE_Q)
+
+        ### Advance our pointers forward to the correct starting point
+        qT_ptrs += start_curr_q * stride_seq
+        dO_ptrs += start_curr_q * stride_seq
+        curr_q = start_curr_q
+
     for blk_idx in range(num_steps):
         
         ### Load qT ###
@@ -671,7 +745,7 @@ def _attn_bwd_dk_dv(
         ### this means we have to advance our offs_q ### 
         ### recall that m = max(x) + log(sum(exp(x)))
 
-        offs_q = curr_q + tl.arange(0, BLOCK_Q)
+        offs_q = curr_q + tl.arange(0, BLOCK_SIZE_Q)
         m = tl.load(M + offs_q)
         
         ### Now we can compute our QK^T for this specific block ###
@@ -748,9 +822,9 @@ def _attn_bwd_dk_dv(
         dK_block += softmax_scale * tl.dot(dS_T_block, tl.trans(qT_block))
 
         ### Increment all our pointers ###
-        curr_q += BLOCK_Q
-        qT_ptrs += BLOCK_Q * stride_seq
-        dO_ptrs+= BLOCK_Q * stride_seq
+        curr_q += BLOCK_SIZE_Q
+        qT_ptrs += BLOCK_SIZE_Q * stride_seq
+        dO_ptrs+= BLOCK_SIZE_Q * stride_seq
     
     ### Store it for the specific batch, head, chunk of sequence we processed ###
     dv_block_ptrs = dV + offs_kv[:, None] * stride_seq + offs_dim[None, :] * stride_dim
@@ -776,6 +850,11 @@ def fused_sdpa_forward(Q, K, V,
     if V.dtype != cp.float16:
         V = V.astype(cp.float16)
 
+    ### This implementation assumes Seq_len is longer than 128 (the max block size of our autotune)
+    ### It also assumes Seq_lens are a power of two!
+    assert SEQ_LEN >= 128, "Flash Attention supported for Context Lengths longer than 128. No real benefit to Flash Attention for short sequences"
+    assert SEQ_LEN & (SEQ_LEN - 1) == 0, "Flash attention supports only Seq Lens that are powers of 2! Max Pad if needed!" 
+
     ### Make sure there is contiguous memory layout ####
     if not Q.flags.c_contiguous:
         Q = cp.ascontiguousarray(Q)
@@ -796,11 +875,7 @@ def fused_sdpa_forward(Q, K, V,
     O = cp.empty_like(Q)
     stage = 3 if causal else 1
 
-    grid = lambda args: (
-        triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]),
-        BATCH_SIZE * NUM_HEADS,
-        1,
-    )
+    grid = lambda args: (triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
 
     # M is the logsumexp for the backward pass, one for each query
     # Make sure to create it on the right device as we are not using empty_like
@@ -820,22 +895,15 @@ def fused_sdpa_forward(Q, K, V,
         stride_Q_head=Q.strides[1] // Q.itemsize,
         stride_Q_seq=Q.strides[2] // Q.itemsize,
         stride_Q_dim=Q.strides[3] // Q.itemsize,
-        stride_K_batch=K.strides[0] // K.itemsize,
-        stride_K_head=K.strides[1] // K.itemsize,
         stride_K_seq=K.strides[2] // K.itemsize,
         stride_K_dim=K.strides[3] // K.itemsize,
-        stride_V_batch=V.strides[0] // V.itemsize,
-        stride_V_head=V.strides[1] // V.itemsize,
         stride_V_seq=V.strides[2] // V.itemsize,
         stride_V_dim=V.strides[3] // V.itemsize,
-        stride_O_batch=O.strides[0] // O.itemsize,
-        stride_O_head=O.strides[1] // O.itemsize,
         stride_O_seq=O.strides[2] // O.itemsize,
         stride_O_dim=O.strides[3] // O.itemsize,
-        BATCH_SIZE=Q.shape[0],
         NUM_HEADS=Q.shape[1],
         SEQ_LEN=Q.shape[2],
-        HEAD_DIM=HEAD_DIM_K,
+        HEAD_DIM=HEAD_DIM_Q,
         STAGE=stage,
     )
 
@@ -859,15 +927,16 @@ def fused_sdpa_backward(dO,
     dV = cp.empty_like(V)
 
     BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM = Q.shape
-    NUM_WARPS, NUM_STAGES = 4, 3
-    BLOCK_SIZE_MICRO, BLOCK_SIZE_MACRO = 16, 128
     
     if softmax_scale is None:
         softmax_scale = 1 / HEAD_DIM**0.5
 
+    ### Scales our log_2 for correctness, because we didnt use ln()
     softmax_scale *= 1.44269504
 
-    preprocess_grid = (SEQ_LEN // BLOCK_SIZE_MACRO, BATCH_SIZE * NUM_HEADS)
+    # preprocess_grid = (SEQ_LEN // BLOCK_SIZE_MACRO, BATCH_SIZE * NUM_HEADS)
+    preprocess_grid = lambda meta: (SEQ_LEN // meta['BLOCK_SIZE_Q'], BATCH_SIZE * NUM_HEADS)
+
     D = cp.empty_like(M)  # Shape: (BATCH_SIZE, NUM_HEADS, SEQ_LEN)
 
     # Compute all the elements Di
@@ -876,12 +945,11 @@ def fused_sdpa_backward(dO,
         dO=dO.data.ptr,
         D=D.data.ptr,
         SEQ_LEN=SEQ_LEN,
-        BLOCK_SIZE_Q=BLOCK_SIZE_MACRO,
         HEAD_DIM=HEAD_DIM,
     )
 
-    grid = (SEQ_LEN // BLOCK_SIZE_MACRO, 1, BATCH_SIZE * NUM_HEADS)
-
+    # grid = (SEQ_LEN // BLOCK_SIZE_MACRO, 1, BATCH_SIZE * NUM_HEADS)
+    grid = lambda meta: (SEQ_LEN // meta["BLOCK_SIZE_KV"], 1, BATCH_SIZE * NUM_HEADS)
     stage = 3 if causal else 1
 
     # Fix KV and iterate through all the Q blocks
@@ -902,14 +970,11 @@ def fused_sdpa_backward(dO,
         stride_dim=Q.strides[3] // Q.itemsize,
         NUM_HEADS=NUM_HEADS,
         SEQ_LEN=SEQ_LEN,
-        BLOCK_Q=BLOCK_SIZE_MICRO,
-        BLOCK_KV=BLOCK_SIZE_MACRO,
         HEAD_DIM=HEAD_DIM,
         STAGE=stage,
-        num_warps=NUM_WARPS,
-        num_stages=NUM_STAGES,
     )
 
+    grid = lambda meta: (SEQ_LEN // meta["BLOCK_SIZE_Q"], 1, BATCH_SIZE * NUM_HEADS)
     # Fix Q and iterate through all the KV block
     _attn_bwd_dq[grid](
         Q=Q.data.ptr,
@@ -928,156 +993,11 @@ def fused_sdpa_backward(dO,
         stride_dim=Q.strides[3] // Q.itemsize,
         NUM_HEADS=NUM_HEADS,
         SEQ_LEN=SEQ_LEN,
-        BLOCK_Q=BLOCK_SIZE_MACRO,
-        BLOCK_KV=BLOCK_SIZE_MICRO,
         HEAD_DIM=HEAD_DIM,
         STAGE=stage,
-        num_warps=NUM_WARPS,
-        num_stages=NUM_STAGES,
     )
 
     return dQ, dK, dV
-
-def test_cupy_op(BATCH_SIZE, 
-                 NUM_HEADS, 
-                 SEQ_LEN, 
-                 HEAD_DIM, 
-                 causal, 
-                 dtype=cp.float16):
-    
-    Q = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
-    K = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
-    V = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
-    dO = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
-
-    Q_torch = torch.tensor(Q, requires_grad=True)
-    K_torch = torch.tensor(K, requires_grad=True)
-    V_torch = torch.tensor(V, requires_grad=True)
-    dO_torch = torch.tensor(dO)
-
-    softmax_scale = 1 / (HEAD_DIM**0.5)
-
-    MASK = torch.tril(torch.ones((SEQ_LEN, SEQ_LEN), device="cuda"))
-    P_torch = torch.matmul(Q_torch, K_torch.transpose(2, 3)) * softmax_scale
-    if causal:
-        P_torch[:, :, MASK == 0] = float("-inf")
-    P_torch = torch.softmax(P_torch.float(), dim=-1).half()
-    ref_O_torch = torch.matmul(P_torch, V_torch)
-    ref_O_torch.backward(dO_torch)
-    dQ_torch = Q_torch.grad
-    dK_torch = K_torch.grad
-    dV_torch = V_torch.grad
-
-    ref_O_cupy = cp.array(ref_O_torch.detach().cpu().numpy())
-    # ref_dq_cupy = cp.array(dQ_torch.detach().cpu().numpy())
-    # ref_dk_cupy = cp.array(dK_torch.detach().cpu().numpy())
-    # ref_dv_cupy = cp.array(dV_torch.detach().cpu().numpy())
-
-    # triton implementation
-    *_, tri_out, M = fused_sdpa_forward(Q, K, V, 
-                                          causal=causal, 
-                                          softmax_scale=softmax_scale)
-    # dQ, dK, dV = fused_sdpa_backward(dO, Q, K, V, tri_out, M, 
-    #                                   softmax_scale=softmax_scale, 
-    #                                   causal=causal)
-
-    # compare
-    tol = 1e-2
-    print("Max Out Diff:", cp.abs(ref_O_cupy - tri_out).max())
-    # print("Max DQ Diff:", cp.abs(ref_dq_cupy - dQ).max())
-    # print("Max DK Diff:", cp.abs(ref_dk_cupy - dK).max())
-    # print("Max DV Diff:", cp.abs(ref_dv_cupy - dV).max())
-    
-    # assert cp.abs(ref_O_cupy - tri_out).max() < tol
-    # assert cp.abs(ref_dq_cupy - dQ).max() < tol
-    # assert cp.abs(ref_dk_cupy - dK).max() < tol
-    # assert cp.abs(ref_dv_cupy - dV).max() < tol
-
-def benchmark_flash_attention(
-    BATCH_SIZE=1,
-    NUM_HEADS=4,
-    SEQ_LEN=128,
-    HEAD_DIM=64,
-    causal=False,
-    dtype=cp.float16,
-    warmup_iters=5,
-    bench_iters=50,
-):
-    # Random inputs
-    Q = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
-    K = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
-    V = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
-    dO = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
-
-    Q_torch = torch.tensor(Q.get(), requires_grad=True, device="cuda", dtype=torch.float16)
-    K_torch = torch.tensor(K.get(), requires_grad=True, device="cuda", dtype=torch.float16)
-    V_torch = torch.tensor(V.get(), requires_grad=True, device="cuda", dtype=torch.float16)
-    dO_torch = torch.tensor(dO.get(), device="cuda", dtype=torch.float16)
-
-    softmax_scale = 1.0 / (HEAD_DIM**0.5)
-    mask = torch.tril(torch.ones((SEQ_LEN, SEQ_LEN), device="cuda")) if causal else None
-
-    if causal:
-        mask = torch.tril(torch.ones((SEQ_LEN, SEQ_LEN), device="cuda"))
-        # Cast mask to same dtype as Q
-        mask = mask.to(torch.float16)
-    else:
-        mask = None
-        
-    def torch_ref():
-        P = torch.matmul(Q_torch, K_torch.transpose(-2, -1)) * softmax_scale
-        if causal:
-            P = P.masked_fill(mask == 0, float("-inf"))
-        P = torch.softmax(P, dim=-1)
-        O = torch.matmul(P, V_torch)
-        return O
-
-    def torch_sdpa():
-        return torch.nn.functional.scaled_dot_product_attention(
-            Q_torch, K_torch, V_torch, attn_mask=None if not causal else mask, is_causal=causal
-        )
-
-    def triton_sdpa():
-        *_, tri_out, M, seed = fused_sdpa_forward(Q, K, V, causal, softmax_scale)
-        return tri_out
-
-    print("Running warmups...")
-    for _ in range(warmup_iters):
-        torch_ref()
-        torch_sdpa()
-        triton_sdpa()
-    torch.cuda.synchronize()
-    cp.cuda.Device().synchronize()
-
-    def bench_fn(fn, sync_fn):
-        start = time.time()
-        for _ in range(bench_iters):
-            out = fn()
-        sync_fn()
-        end = time.time()
-        return (end - start) / bench_iters, out
-
-    print("\nBenchmarking...")
-
-    t_ref, ref_out = bench_fn(torch_ref, torch.cuda.synchronize)
-    t_sdpa, sdpa_out = bench_fn(torch_sdpa, torch.cuda.synchronize)
-    t_tri, tri_out = bench_fn(triton_sdpa, cp.cuda.Device().synchronize)
-
-    print(f"PyTorch ref  : {t_ref*1000:.3f} ms")
-    print(f"PyTorch SDPA : {t_sdpa*1000:.3f} ms")
-    print(f"Triton CuPy  : {t_tri*1000:.3f} ms")
-
-    ref_out_cu = cp.array(ref_out.detach().cpu().numpy())
-    diff = cp.abs(ref_out_cu - tri_out)
-    print(f"\nMax Out Diff: {diff.max():.4e}")
-
-    return {
-        "seq_len": SEQ_LEN,
-        "torch_ref_ms": t_ref * 1000,
-        "torch_sdpa_ms": t_sdpa * 1000,
-        "triton_ms": t_tri * 1000,
-        "max_diff": float(diff.max()),
-    }
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
@@ -1085,17 +1005,154 @@ if __name__ == "__main__":
     import torch
     import time 
 
-    print("Checking for Correctness")
-    test_cupy_op(BATCH_SIZE=8, NUM_HEADS=16, SEQ_LEN=15, HEAD_DIM=64, causal=True)
-    # test_cupy_op(BATCH_SIZE=8, NUM_HEADS=16, SEQ_LEN=128, HEAD_DIM=64, causal=False)
-    print("All Correct!!")
+    def test_cupy_op(BATCH_SIZE, 
+                 NUM_HEADS, 
+                 SEQ_LEN, 
+                 HEAD_DIM, 
+                 causal, 
+                 dtype=cp.float16):
+    
+        Q = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
+        K = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
+        V = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
+        dO = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
 
+        Q_torch = torch.tensor(Q, requires_grad=True)
+        K_torch = torch.tensor(K, requires_grad=True)
+        V_torch = torch.tensor(V, requires_grad=True)
+        dO_torch = torch.tensor(dO)
+
+        softmax_scale = 1 / (HEAD_DIM**0.5)
+
+        MASK = torch.tril(torch.ones((SEQ_LEN, SEQ_LEN), device="cuda"))
+        P_torch = torch.matmul(Q_torch, K_torch.transpose(2, 3)) * softmax_scale
+        if causal:
+            P_torch[:, :, MASK == 0] = float("-inf")
+        P_torch = torch.softmax(P_torch.float(), dim=-1).half()
+        ref_O_torch = torch.matmul(P_torch, V_torch)
+        ref_O_torch.backward(dO_torch)
+        dQ_torch = Q_torch.grad
+        dK_torch = K_torch.grad
+        dV_torch = V_torch.grad
+
+        ref_O_cupy = cp.array(ref_O_torch.detach().cpu().numpy())
+        ref_dq_cupy = cp.array(dQ_torch.detach().cpu().numpy())
+        ref_dk_cupy = cp.array(dK_torch.detach().cpu().numpy())
+        ref_dv_cupy = cp.array(dV_torch.detach().cpu().numpy())
+
+        # triton implementation
+        *_, tri_out, M = fused_sdpa_forward(Q, K, V, 
+                                            causal=causal, 
+                                            softmax_scale=softmax_scale)
+        dQ, dK, dV = fused_sdpa_backward(dO, Q, K, V, tri_out, M, 
+                                        softmax_scale=softmax_scale, 
+                                        causal=causal)
+
+        # compare
+        tol = 1e-2
+        print("Max Out Diff:", cp.abs(ref_O_cupy - tri_out).max())
+        print("Max DQ Diff:", cp.abs(ref_dq_cupy - dQ).max())
+        print("Max DK Diff:", cp.abs(ref_dk_cupy - dK).max())
+        print("Max DV Diff:", cp.abs(ref_dv_cupy - dV).max())
+        
+        assert cp.abs(ref_O_cupy - tri_out).max() < tol
+        assert cp.abs(ref_dq_cupy - dQ).max() < tol
+        assert cp.abs(ref_dk_cupy - dK).max() < tol
+        assert cp.abs(ref_dv_cupy - dV).max() < tol
+
+    # def benchmark_flash_attention(
+    #     BATCH_SIZE=1,
+    #     NUM_HEADS=4,
+    #     SEQ_LEN=128,
+    #     HEAD_DIM=64,
+    #     causal=False,
+    #     dtype=cp.float16,
+    #     warmup_iters=5,
+    #     bench_iters=50,
+    # ):
+    #     # Random inputs
+    #     Q = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
+    #     K = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
+    #     V = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
+    #     dO = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
+
+    #     Q_torch = torch.tensor(Q.get(), requires_grad=True, device="cuda", dtype=torch.float16)
+    #     K_torch = torch.tensor(K.get(), requires_grad=True, device="cuda", dtype=torch.float16)
+    #     V_torch = torch.tensor(V.get(), requires_grad=True, device="cuda", dtype=torch.float16)
+    #     dO_torch = torch.tensor(dO.get(), device="cuda", dtype=torch.float16)
+
+    #     softmax_scale = 1.0 / (HEAD_DIM**0.5)
+    #     mask = torch.tril(torch.ones((SEQ_LEN, SEQ_LEN), device="cuda")) if causal else None
+
+    #     if causal:
+    #         mask = torch.tril(torch.ones((SEQ_LEN, SEQ_LEN), device="cuda"))
+    #         # Cast mask to same dtype as Q
+    #         mask = mask.to(torch.float16)
+    #     else:
+    #         mask = None
+            
+    #     def torch_ref():
+    #         P = torch.matmul(Q_torch, K_torch.transpose(-2, -1)) * softmax_scale
+    #         if causal:
+    #             P = P.masked_fill(mask == 0, float("-inf"))
+    #         P = torch.softmax(P, dim=-1)
+    #         O = torch.matmul(P, V_torch)
+    #         return O
+
+    #     def torch_sdpa():
+    #         return torch.nn.functional.scaled_dot_product_attention(
+    #             Q_torch, K_torch, V_torch, attn_mask=None if not causal else mask, is_causal=causal
+    #         )
+
+    #     def triton_sdpa():
+    #         *_, tri_out, M, seed = fused_sdpa_forward(Q, K, V, causal, softmax_scale)
+    #         return tri_out
+
+    #     print("Running warmups...")
+    #     for _ in range(warmup_iters):
+    #         torch_ref()
+    #         torch_sdpa()
+    #         triton_sdpa()
+    #     torch.cuda.synchronize()
+    #     cp.cuda.Device().synchronize()
+
+    #     def bench_fn(fn, sync_fn):
+    #         start = time.time()
+    #         for _ in range(bench_iters):
+    #             out = fn()
+    #         sync_fn()
+    #         end = time.time()
+    #         return (end - start) / bench_iters, out
+
+    #     print("\nBenchmarking...")
+
+    #     t_ref, ref_out = bench_fn(torch_ref, torch.cuda.synchronize)
+    #     t_sdpa, sdpa_out = bench_fn(torch_sdpa, torch.cuda.synchronize)
+    #     t_tri, tri_out = bench_fn(triton_sdpa, cp.cuda.Device().synchronize)
+
+    #     print(f"PyTorch ref  : {t_ref*1000:.3f} ms")
+    #     print(f"PyTorch SDPA : {t_sdpa*1000:.3f} ms")
+    #     print(f"Triton CuPy  : {t_tri*1000:.3f} ms")
+
+    #     ref_out_cu = cp.array(ref_out.detach().cpu().numpy())
+    #     diff = cp.abs(ref_out_cu - tri_out)
+    #     print(f"\nMax Out Diff: {diff.max():.4e}")
+
+    #     return {
+    #         "seq_len": SEQ_LEN,
+    #         "torch_ref_ms": t_ref * 1000,
+    #         "torch_sdpa_ms": t_sdpa * 1000,
+    #         "triton_ms": t_tri * 1000,
+    #         "max_diff": float(diff.max()),
+    #     }
+
+    
     # print("Benchmarking")
     # all_results = []
-    # for seq_len in [64,128,256,512,1024,2048,4096]:
+    # for seq_len in [128,256,512,1024,2048,4096]:
     #     print("Testing Seq Len:", seq_len)
     #     results = benchmark_flash_attention(
-    #         BATCH_SIZE=32,
+    #         BATCH_SIZE=4,
     #         NUM_HEADS=12,
     #         SEQ_LEN=seq_len,
     #         HEAD_DIM=64,
@@ -1119,4 +1176,188 @@ if __name__ == "__main__":
     # plt.grid(True)
     # plt.savefig("benchmark/flash_attn.png")
     # plt.show()
-    
+
+    def benchmark_flash_attention(
+        BATCH_SIZE=1,
+        NUM_HEADS=4,
+        SEQ_LEN=128,
+        HEAD_DIM=64,
+        causal=False,
+        dtype=cp.float16,
+        warmup_iters=5,
+        bench_iters=50,
+    ):
+        Q = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
+        K = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
+        V = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
+        dO = cp.random.normal(size=(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)).astype(dtype)
+
+        Q_torch = torch.tensor(Q.get(), requires_grad=True, device="cuda", dtype=torch.float16)
+        K_torch = torch.tensor(K.get(), requires_grad=True, device="cuda", dtype=torch.float16)
+        V_torch = torch.tensor(V.get(), requires_grad=True, device="cuda", dtype=torch.float16)
+        dO_torch = torch.tensor(dO.get(), device="cuda", dtype=torch.float16)
+
+        softmax_scale = 1.0 / (HEAD_DIM ** 0.5)
+        mask = torch.tril(torch.ones((SEQ_LEN, SEQ_LEN), device="cuda", dtype=torch.float16)) if causal else None
+
+        def torch_ref_forward():
+            P = torch.matmul(Q_torch, K_torch.transpose(-2, -1)) * softmax_scale
+            if causal:
+                P = P.masked_fill(mask == 0, float("-inf"))
+            P = torch.softmax(P, dim=-1)
+            O = torch.matmul(P, V_torch)
+            return O
+
+        def torch_sdpa_forward():
+            return torch.nn.functional.scaled_dot_product_attention(
+                Q_torch, K_torch, V_torch, attn_mask=None if not causal else mask, is_causal=causal
+            )
+
+        def triton_forward():
+            # be robust in case fused_sdpa_forward returns additional items:
+            ret = fused_sdpa_forward(Q, K, V, causal, softmax_scale)
+            tri_out = ret[-2]  # second last is O (matching previous return signature)
+            M = ret[-1]
+            return tri_out, M
+
+        def triton_backward_call(tri_out, M):
+            # call backward-only kernel (expects precomputed tri_out and M)
+            dQ, dK, dV = fused_sdpa_backward(dO, Q, K, V, tri_out, M, causal, softmax_scale)
+            return dQ, dK, dV
+
+        print(f"[Warmup] forward kernels (seq_len={SEQ_LEN})")
+        for _ in range(warmup_iters):
+            _ = torch_ref_forward()
+            _ = torch_sdpa_forward()
+            _ = triton_forward()
+        torch.cuda.synchronize()
+        cp.cuda.Device().synchronize()
+
+        print(f"[Warmup] backward kernels (seq_len={SEQ_LEN})")
+        # precompute forward outputs (we keep the computation graph for torch so backward is pure backward)
+        O_ref = torch_ref_forward()         # keep graph
+        O_sdpa = torch_sdpa_forward()       # keep graph
+        tri_out, M = triton_forward()       # CuPy arrays
+
+        for _ in range(warmup_iters):
+            O_ref.backward(dO_torch, retain_graph=True)
+            O_sdpa.backward(dO_torch, retain_graph=True)
+            _ = triton_backward_call(tri_out, M)
+
+        torch.cuda.synchronize()
+        cp.cuda.Device().synchronize()
+
+
+        # PyTorch naive forward timing
+        start = time.time()
+        for _ in range(bench_iters):
+            _ = torch_ref_forward()
+        torch.cuda.synchronize()
+        t_ref_fwd = (time.time() - start) / bench_iters
+
+        # PyTorch SDPA forward timing
+        start = time.time()
+        for _ in range(bench_iters):
+            _ = torch_sdpa_forward()
+        torch.cuda.synchronize()
+        t_sdpa_fwd = (time.time() - start) / bench_iters
+
+        # Triton forward timing
+        start = time.time()
+        for _ in range(bench_iters):
+            tri_out, M = triton_forward()
+        cp.cuda.Device().synchronize()
+        t_tri_fwd = (time.time() - start) / bench_iters
+
+        # Precompute forward outputs once (keep graphs) so we only measure backward work
+        O_ref = torch_ref_forward()
+        O_sdpa = torch_sdpa_forward()
+        tri_out, M = triton_forward()  # CuPy arrays
+
+        # PyTorch naive backward-only timing (call backward on precomputed O_ref)
+        start = time.time()
+        for _ in range(bench_iters):
+            O_ref.backward(dO_torch, retain_graph=True)
+        torch.cuda.synchronize()
+        t_ref_bwd = (time.time() - start) / bench_iters
+
+        # PyTorch SDPA backward-only timing
+        start = time.time()
+        for _ in range(bench_iters):
+            O_sdpa.backward(dO_torch, retain_graph=True)
+        torch.cuda.synchronize()
+        t_sdpa_bwd = (time.time() - start) / bench_iters
+
+        # Triton backward-only timing (call the backward kernel only)
+        start = time.time()
+        for _ in range(bench_iters):
+            _ = fused_sdpa_backward(dO, Q, K, V, tri_out, M, causal, softmax_scale)
+        cp.cuda.Device().synchronize()
+        t_tri_bwd = (time.time() - start) / bench_iters
+
+        print(f"Forward times (ms): TorchRef={t_ref_fwd*1000:.2f}, TorchSDPA={t_sdpa_fwd*1000:.2f}, Triton={t_tri_fwd*1000:.2f}")
+        print(f"Backward times (ms): TorchRef={t_ref_bwd*1000:.2f}, TorchSDPA={t_sdpa_bwd*1000:.2f}, Triton={t_tri_bwd*1000:.2f}")
+
+        return {
+            "seq_len": SEQ_LEN,
+            "torch_ref_fwd_ms": t_ref_fwd * 1000,
+            "torch_sdpa_fwd_ms": t_sdpa_fwd * 1000,
+            "triton_fwd_ms": t_tri_fwd * 1000,
+            "torch_ref_bwd_ms": t_ref_bwd * 1000,
+            "torch_sdpa_bwd_ms": t_sdpa_bwd * 1000,
+            "triton_bwd_ms": t_tri_bwd * 1000,
+        }
+
+    print("Checking for Correctness")
+    test_cupy_op(BATCH_SIZE=8, NUM_HEADS=6, SEQ_LEN=256, HEAD_DIM=64, causal=True)
+    test_cupy_op(BATCH_SIZE=8, NUM_HEADS=16, SEQ_LEN=256, HEAD_DIM=64, causal=False)
+    print("All Correct!!")
+
+    print("Benchmarking")
+    all_results = []
+    seq_list = [128, 256, 512, 1024, 2048, 4096]
+    for seq_len in seq_list:
+        print("Testing Seq Len:", seq_len)
+        results = benchmark_flash_attention(
+            BATCH_SIZE=4,
+            NUM_HEADS=12,
+            SEQ_LEN=seq_len,
+            HEAD_DIM=64,
+            causal=True,
+            dtype=cp.float16,
+            warmup_iters=5,
+            bench_iters=50,
+        )
+        all_results.append(results)
+
+    seq_lens = np.array([r["seq_len"] for r in all_results])
+    forward_times = np.array([[r["torch_ref_fwd_ms"], r["torch_sdpa_fwd_ms"], r["triton_fwd_ms"]] for r in all_results])
+    backward_times = np.array([[r["torch_ref_bwd_ms"], r["torch_sdpa_bwd_ms"], r["triton_bwd_ms"]] for r in all_results])
+
+    # Forward plot
+    plt.figure(figsize=(9, 5))
+    plt.plot(seq_lens, forward_times[:, 0], "-o", label="PyTorch Naive Fwd", linewidth=2)
+    plt.plot(seq_lens, forward_times[:, 1], "-o", label="PyTorch SDPA Fwd", linewidth=2)
+    plt.plot(seq_lens, forward_times[:, 2], "-o", label="Triton FlashAttention Fwd", linewidth=2)
+    plt.xlabel("Sequence Length (L)")
+    plt.ylabel("Time (ms)")
+    plt.title("Forward Attention Runtime (forward-only)")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("benchmark/flash_attn_forward.png")
+    plt.show()
+
+    # Backward plot
+    plt.figure(figsize=(9, 5))
+    plt.plot(seq_lens, backward_times[:, 0], "-o", label="PyTorch Naive Bwd", linewidth=2)
+    plt.plot(seq_lens, backward_times[:, 1], "-o", label="PyTorch SDPA Bwd", linewidth=2)
+    plt.plot(seq_lens, backward_times[:, 2], "-o", label="Triton FlashAttention Bwd", linewidth=2)
+    plt.xlabel("Sequence Length (L)")
+    plt.ylabel("Time (ms)")
+    plt.title("Backward Attention Runtime (backward-only)")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("benchmark/flash_attn_backward.png")
+    plt.show()
