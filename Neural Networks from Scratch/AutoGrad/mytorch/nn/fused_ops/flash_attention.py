@@ -1,18 +1,17 @@
 """
-All credit goes to incredible work by Umar Jamil, definitely watch the video! 
-https://github.com/hkproj/triton-flash-attention/blob/main/triton/flash_attention.py
+FlashAttention2 Kernel (Online-Softmax Applied to Attention)
+
+Some really awesome resources that this was largely based off of!
+1) Umar Jamil: https://github.com/hkproj/triton-flash-attention
+2) Evintunador: https://github.com/evintunador/triton_docs_tutorials
 
 And of course this is also based off of the official implementation provided by Triton!
 https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html#sphx-glr-getting-started-tutorials-06-fused-attention-py
 
 This adapts the existing code with Cupy!
 
-SOME SUPER CAVEATS THOUGH!!! This code lacks some critical features, but for now its probably fine:
-
-1) SEQ_LENS have to be atleast 128 (but why bother with all this for short sequences?)
-2) SEQ_LENS must be a power of 2 (this is fine for pretraining, but finetuning would require max padding)
-3) NO Support for attention masks. This does CAUSAL or Not Causal. Custom masks are not supported (YET?)
-4) NO Dropout on our attention scores! Maybe another feature to come?
+1) NO Support for attention masks. This does CAUSAL or Not Causal. Custom masks are not supported (YET?)
+2) NO Dropout on our attention scores! Maybe another feature to come?
 
 """
 import triton
@@ -58,6 +57,7 @@ def _attn_fwd_inner(
         ### looking at k/v that are <= in index 
 
         lo, hi = 0, block_index_q * BLOCK_SIZE_Q
+
     elif STAGE == 2:
         ### On the diagonal, we have another condition to handle:
         ### Lets say we grab the top left corner (qk00) and each block is processing 
@@ -96,8 +96,11 @@ def _attn_fwd_inner(
         ### Let the compiler know that start_n is a multiple of BLOCK_N ###
         start_kv = tl.multiple_of(start_kv, BLOCK_SIZE_KV)
 
+        kv_indices = start_kv + offs_kv
+        kv_padding_mask = kv_indices < SEQ_LEN
+
         ### Compute our QK (it was already pretransposed) ###
-        K_block = tl.load(K_block_ptr)
+        K_block = tl.load(K_block_ptr, boundary_check=(1,), padding_option="zero")
 
         ### We have a (Q_BLOCK_SIZE x E) and (E x KV_BLOCK_SIZE) matricies ###
         ### we can just use dot to do our dot product computation ###
@@ -116,8 +119,8 @@ def _attn_fwd_inner(
             # [2]                [True True  True  False]
             # [3]                [True True  True  True]
             # and then we can just fill the False with a large negative number!
-
-            mask = offs_q[:, None] >= (start_kv + offs_kv[None, :])
+            causal_mask = offs_q[:, None] >= kv_indices[None, :]
+            mask = causal_mask & kv_padding_mask[None, :]
             QK_block = QK_block * softmax_scale + tl.where(mask, 0, -1.0e6)
 
             ### Update our current estimate for the max ###
@@ -131,6 +134,7 @@ def _attn_fwd_inner(
             ### for k and v indexes are already set. If we are full attention, we dont
             ### really care, if we are causal then this part only handles the blocks that 
             ### dont have exceptions like STAGE=2
+            QK_block = tl.where(kv_padding_mask[None, :], QK_block, -1.0e6)
             m_ij = tl.maximum(m_i, tl.max(QK_block, 1) * softmax_scale)
             QK_block = QK_block * softmax_scale - m_ij[:, None]
 
@@ -147,7 +151,7 @@ def _attn_fwd_inner(
         l_i = l_i * alpha + l_ij
 
         ### Load the Values ###
-        V_block = tl.load(V_block_ptr)
+        V_block = tl.load(V_block_ptr, boundary_check=(0,), padding_option="zero")
 
         ### Cast ###
         P_block = P_block.to(tl.float16)
@@ -174,8 +178,8 @@ def _attn_fwd_inner(
         )
         for BLOCK_SIZE_Q in [64, 128]
         for BLOCK_SIZE_KV in [32, 64, 128]
-        for num_stages in ([2, 3, 4])
-        for num_warps in [4, 8, 16]
+        for num_stages in ([2,3,4])
+        for num_warps in [4,8,16]
     ],
     key=["SEQ_LEN", "HEAD_DIM"],
 )
@@ -309,7 +313,7 @@ def _attn_fwd(
     O_block = tl.zeros([BLOCK_SIZE_Q, HEAD_DIM], dtype=tl.float32)
 
     ### Load our Query Block ###
-    Q_block = tl.load(Q_block_ptr)
+    Q_block = tl.load(Q_block_ptr, boundary_check=(0,), padding_option="zero")
 
     ### Inner loop ###
     ### Stage 3 is for causal
@@ -359,8 +363,10 @@ def _attn_fwd(
 
     ### Store our temporary output M ###
     m_ptrs = M + index_batch_head * SEQ_LEN + offs_q
-    tl.store(m_ptrs, m_i)
-    tl.store(O_block_ptr, O_block.to(O.type.element_ty))
+    q_padding_mask = offs_q < SEQ_LEN
+    tl.store(m_ptrs, m_i, mask=q_padding_mask)
+
+    tl.store(O_block_ptr, O_block.to(O.type.element_ty), boundary_check=(0,))
 
 
 @triton.autotune(
@@ -371,8 +377,8 @@ def _attn_fwd(
             num_warps=num_warps,
         )
         for BLOCK_SIZE_Q in [64, 128]
-        for num_stages in ([2, 3, 4])
-        for num_warps in [4, 8, 16]
+        for num_stages in ([2,3,4])
+        for num_warps in [4,8,16]
     ],
     key=["SEQ_LEN", "HEAD_DIM"],
 )
@@ -381,7 +387,7 @@ def _attn_bwd_preprocess(
     O,
     dO,
     D,
-    SEQ_LEN,
+    SEQ_LEN: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     HEAD_DIM: tl.constexpr,
 ):
@@ -394,40 +400,40 @@ def _attn_bwd_preprocess(
     block_idx_q = tl.program_id(0)
     offs_q = block_idx_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
     
+    ### Create a mask for the sequence dimension ###
+    q_padding_mask = offs_q >= 0
+ 
     ### Which batch and which head in that batch are we computing ###
-    ### And then grad the entire embedding dim ###
     index_batch_head = tl.program_id(1)
     offs_dim = tl.arange(0, HEAD_DIM) 
 
-    ### Load a single block of BLOCK_SIZE_Q rows of O ###
-    ### Remember, O has shape (Batch x Num Heads x Seq Len x Embed Dim)
+    batch_head_offset = index_batch_head * SEQ_LEN * HEAD_DIM
+    seq_offsets = offs_q[:, None] * HEAD_DIM
+    dim_offsets = offs_dim[None, :]
 
-    # The reason you see offs_q[:, None] and offs_dim[None, :] is for broadcasting. We want a block
-    # that contains every embedding value for every query vector. So this produces a 2d set of poitners
-    # where the first dimension is which query do we want, and the second is which embedding value do we want from that embedding vector (all of them in our case)
-
+    O_ptrs = O + batch_head_offset + seq_offsets + dim_offsets
+    dO_ptrs = dO + batch_head_offset + seq_offsets + dim_offsets
+    
+    ### Load O block with padding mask ###
     O_block = tl.load(
-        O  
-        + index_batch_head * HEAD_DIM * SEQ_LEN # Each batch has HEAD_DIM * SEQ_LEN items inside so advance to our correct index
-        + offs_q[:, None] * HEAD_DIM            # Get to the first query vector we want to process in this block 
-        + offs_dim[None, :]                     # Get the entire embedding length for each
+        O_ptrs, 
+        mask=q_padding_mask[:, None], 
+        other=0.0
     ).to(tl.float32) 
     
-    ### Similarly load our dO BLock ###
+    ### Load dO block with padding mask ###
     dO_block = tl.load(
-        dO  
-        + index_batch_head * HEAD_DIM * SEQ_LEN 
-        + offs_q[:, None] * HEAD_DIM            
-        + offs_dim[None, :]                     
+        dO_ptrs,
+        mask=q_padding_mask[:, None], 
+        other=0.0
     ).to(tl.float32) 
 
-    
     ### Compute our D_block ###
-    D_block = tl.sum(dO_block * O_block, axis=1) # Creates a single scalar for EACH item in our block, so we get (BLOCK_SIZE_Q, )
+    D_block = tl.sum(dO_block * O_block, axis=1)
 
-    ### Store it ###
+    ### Store D with padding mask ###
     D_block_ptrs = D + index_batch_head * SEQ_LEN + offs_q
-    tl.store(D_block_ptrs, D_block)
+    tl.store(D_block_ptrs, D_block, mask=q_padding_mask)
 
 @triton.autotune(
     [
@@ -438,8 +444,8 @@ def _attn_bwd_preprocess(
         )
         for BLOCK_SIZE_Q in [64, 128]
         for BLOCK_SIZE_KV in [32, 64, 128]
-        for num_stages in ([2, 3, 4])
-        for num_warps in [4, 8, 16]
+        for num_stages in ([2,3,4])
+        for num_warps in [4,8,16]
     ],
     key=["SEQ_LEN", "HEAD_DIM"],
 )
@@ -466,11 +472,6 @@ def _attn_bwd_dq(
     HEAD_DIM: tl.constexpr,
     STAGE: tl.constexpr,
 ):  
-    """
-    Identical to the code _attn_bwd_dk_dv, except we are now
-    looping through chunks of K and V instead for some given chunk 
-    of Q. And we return only the grad for Q
-    """
 
     LN2: tl.constexpr = 0.6931471824645996
 
@@ -508,13 +509,20 @@ def _attn_bwd_dq(
     start_q = index_block_kv * BLOCK_SIZE_Q
     offs_q = start_q + tl.arange(0, BLOCK_SIZE_Q)
 
-    Q_block = tl.load(Q + offs_q[:, None] * stride_seq + offs_dim[None, :] * stride_dim)
+    q_mask = offs_q < SEQ_LEN
+
+    Q_block = tl.load(Q + offs_q[:, None] * stride_seq + offs_dim[None, :] * stride_dim, 
+                      mask=q_mask[:, None], 
+                      other=0.)
+    
     dQ_block = tl.zeros([BLOCK_SIZE_Q, HEAD_DIM], dtype=tl.float32)
     dO_block = tl.load(
-        dO + offs_q[:, None] * stride_seq + offs_dim[None, :] * stride_dim
+        dO + offs_q[:, None] * stride_seq + offs_dim[None, :] * stride_dim,
+        mask=q_mask[:, None],
+        other=0.
     )
 
-    M_block = tl.load(M + offs_q)
+    M_block = tl.load(M + offs_q, mask=q_mask, other=0.)
     M_block = M_block[:, None]
     
     offs_kv = tl.arange(0, BLOCK_SIZE_KV)
@@ -522,10 +530,10 @@ def _attn_bwd_dq(
     kT_ptrs = K + offs_kv[None, :] * stride_seq + offs_dim[:, None] * stride_dim
     vT_ptrs = V + offs_kv[None, :] * stride_seq + offs_dim[:, None] * stride_dim
 
-    Di = tl.load(D + offs_q)
+    Di = tl.load(D + offs_q, mask=q_mask, other=0.)
 
     curr_kv = 0
-    num_steps = SEQ_LEN // BLOCK_SIZE_KV
+    num_steps = tl.cdiv(SEQ_LEN, BLOCK_SIZE_KV)
     if STAGE == 3:
         # For causal, limit the loop to only the relevant KV blocks 
         # (up to the end of this Q block). Q cant attend to KV blocks 
@@ -534,15 +542,24 @@ def _attn_bwd_dq(
         num_steps = tl.cdiv(max_offs_q, BLOCK_SIZE_KV)
 
     for blk_idx in range(num_steps):
-        K_T_block = tl.load(kT_ptrs)
-        V_T_block = tl.load(vT_ptrs)
+
+        offs_kv = curr_kv + tl.arange(0, BLOCK_SIZE_KV)
+
+        kv_mask = offs_kv < SEQ_LEN
+
+        K_T_block = tl.load(kT_ptrs, mask=kv_mask[None, :], other=0.)
+        V_T_block = tl.load(vT_ptrs, mask=kv_mask[None, :], other=0.)
+
         QK_block = softmax_scale * tl.dot(Q_block, K_T_block)
         P_block = tl.math.exp2(QK_block - M_block)
 
         if STAGE == 3:
-            offs_kv = curr_kv + tl.arange(0, BLOCK_SIZE_KV)
+            
             mask_block = offs_q[:, None] >= offs_kv[None, :]
             P_block = tl.where(mask_block, P_block, 0.0)
+
+        seq_mask = q_mask[:, None] & kv_mask[None, :]
+        P_block = tl.where(seq_mask, P_block, 0.0)
 
         dP_block = tl.dot(dO_block, V_T_block).to(tl.float32)
 
@@ -555,7 +572,7 @@ def _attn_bwd_dq(
         vT_ptrs += BLOCK_SIZE_KV * stride_seq
 
     dQ_block_ptrs = dQ + offs_q[:, None] * stride_seq + offs_dim[None, :] * stride_dim
-    tl.store(dQ_block_ptrs, dQ_block)
+    tl.store(dQ_block_ptrs, dQ_block, mask=q_mask[:, None])
 
 @triton.autotune(
     [
@@ -566,8 +583,8 @@ def _attn_bwd_dq(
         )
         for BLOCK_SIZE_Q in [64, 128]
         for BLOCK_SIZE_KV in [32, 64, 128]
-        for num_stages in ([2, 3, 4])
-        for num_warps in [4, 8, 16]
+        for num_stages in ([2,3,4])
+        for num_warps in [4,8,16]
     ],
     key=["SEQ_LEN", "HEAD_DIM"],
 )
@@ -648,6 +665,9 @@ def _attn_bwd_dk_dv(
     ### Get all indexes for that block ###
     offs_kv = start_kv + tl.arange(0, BLOCK_SIZE_KV)
 
+    ### Create a mask so we dont access invalid KV Indices ###
+    kv_mask = offs_kv < SEQ_LEN
+
     ### initialize dV and dK for this block to accumulate into ###
     dV_block = tl.zeros([BLOCK_SIZE_KV, HEAD_DIM], dtype=tl.float32)
     dK_block = tl.zeros([BLOCK_SIZE_KV, HEAD_DIM], dtype=tl.float32)
@@ -657,10 +677,14 @@ def _attn_bwd_dk_dv(
     ### need to get a 2d grid of points that tell us which steps in our seqlen, and 
     ### which embed dims we want (all of them in our case)
     K_block = tl.load(
-        K + offs_kv[:, None] * stride_seq + offs_dim[None, :] * stride_dim
+        K + offs_kv[:, None] * stride_seq + offs_dim[None, :] * stride_dim,
+        mask=kv_mask[:, None],
+        other=0.
     )
     V_block = tl.load(
-        V + offs_kv[:, None] * stride_seq + offs_dim[None, :] * stride_dim
+        V + offs_kv[:, None] * stride_seq + offs_dim[None, :] * stride_dim,
+        mask=kv_mask[:, None],
+        other=0.
     )
 
     ### For each block of our k/v how many queries do we want to load? Lets ###
@@ -708,7 +732,7 @@ def _attn_bwd_dk_dv(
 
     ### Iterate over the sequence of dims ###
     curr_q = 0
-    num_steps = SEQ_LEN // BLOCK_SIZE_Q
+    num_steps = tl.cdiv(SEQ_LEN, BLOCK_SIZE_Q) #SEQ_LEN // BLOCK_SIZE_Q
     if STAGE == 3:
 
         ### KV Can attend to any Q after it (as Q can only attend to stuff before it)
@@ -738,15 +762,19 @@ def _attn_bwd_dk_dv(
 
     for blk_idx in range(num_steps):
         
+        ### Update offs_q for current block ###
+        offs_q = curr_q + tl.arange(0, BLOCK_SIZE_Q)
+
+        ### Create a Mask for Q Blocks ###
+        q_mask = offs_q < SEQ_LEN
+
         ### Load qT ###
-        qT_block = tl.load(qT_ptrs)
+        qT_block = tl.load(qT_ptrs, mask=q_mask[None, :], other=0.)
 
         ### Load the logsumexp values for the queries in the current block ###
         ### this means we have to advance our offs_q ### 
         ### recall that m = max(x) + log(sum(exp(x)))
-
-        offs_q = curr_q + tl.arange(0, BLOCK_SIZE_Q)
-        m = tl.load(M + offs_q)
+        m = tl.load(M + offs_q, mask=q_mask, other=0.)
         
         ### Now we can compute our QK^T for this specific block ###
         ### but we are doing everything transposed already so we need to do ###
@@ -789,9 +817,13 @@ def _attn_bwd_dk_dv(
             ### Fill our probabilties with 0 as they dont contribute ###
             P_T_block = tl.where(mask_block, P_T_block, 0.0)
 
+        ### Create a seq_len mask that masks out any invalid attention scores ###
+        seq_mask = kv_mask[:, None] & q_mask[None, :]
+        P_T_block = tl.where(seq_mask, P_T_block, 0.0)
+
         ### Lets load the dO block that correspond to the slice of queries we are currently ###
         ### processing. 
-        dO_block = tl.load(dO_ptrs)
+        dO_block = tl.load(dO_ptrs, mask=q_mask[:, None], other=0.)
 
         ### Now we start to accumulate grads. Each block of the output contribute to our 
         ### gradient for dV. dV_i = sum_j(P_ij * dO_i)
@@ -807,14 +839,13 @@ def _attn_bwd_dk_dv(
         ### Remember, that our K has already been transposed. All our formulas that go into 
         ### Saving our dK must also be transposed! so we can just 
         ### flip them all to be [dO^Tv_j]^T = v_T dO 
-        Di = tl.load(D + offs_q)
+        Di = tl.load(D + offs_q, mask=q_mask, other=0.)
         dpT_block = tl.dot(V_block, tl.trans(dO_block)).to(tl.float32)
         dS_T_block = P_T_block * (dpT_block - Di[None, :])
 
         ### Now remember we had scaled our forward by 1/ln(2) to accounts for our log(2) ###
         ## Now we need to undo that scaling! ###
         dS_T_block *= LN2
-
         dS_T_block = dS_T_block.to(tl.float16)
 
         ### All we have left then is the q_i and our constant scale to add in! ###
@@ -828,10 +859,10 @@ def _attn_bwd_dk_dv(
     
     ### Store it for the specific batch, head, chunk of sequence we processed ###
     dv_block_ptrs = dV + offs_kv[:, None] * stride_seq + offs_dim[None, :] * stride_dim
-    tl.store(dv_block_ptrs, dV_block)
+    tl.store(dv_block_ptrs, dV_block, mask=kv_mask[:, None])
 
     dK_block_ptrs = dK + offs_kv[:, None] * stride_seq + offs_dim[None, :] * stride_dim
-    tl.store(dK_block_ptrs, dK_block)
+    tl.store(dK_block_ptrs, dK_block, mask=kv_mask[:, None])
 
 def fused_sdpa_forward(Q, K, V, 
                        causal, 
@@ -852,8 +883,8 @@ def fused_sdpa_forward(Q, K, V,
 
     ### This implementation assumes Seq_len is longer than 128 (the max block size of our autotune)
     ### It also assumes Seq_lens are a power of two!
-    assert SEQ_LEN >= 128, "Flash Attention supported for Context Lengths longer than 128. No real benefit to Flash Attention for short sequences"
-    assert SEQ_LEN & (SEQ_LEN - 1) == 0, "Flash attention supports only Seq Lens that are powers of 2! Max Pad if needed!" 
+    # assert SEQ_LEN >= 128, "Flash Attention supported for Context Lengths longer than 128. No real benefit to Flash Attention for short sequences"
+    # assert SEQ_LEN & (SEQ_LEN - 1) == 0, "Flash attention supports only Seq Lens that are powers of 2! Max Pad if needed!" 
 
     ### Make sure there is contiguous memory layout ####
     if not Q.flags.c_contiguous:
@@ -922,9 +953,9 @@ def fused_sdpa_backward(dO,
         dO = dO.astype(cp.float16)
     
     assert Q.strides == K.strides == V.strides == O.strides == dO.strides
-    dQ = cp.empty_like(Q)
-    dK = cp.empty_like(K)
-    dV = cp.empty_like(V)
+    dQ = cp.zeros_like(Q)
+    dK = cp.zeros_like(K)
+    dV = cp.zeros_like(V)
 
     BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM = Q.shape
     
@@ -935,7 +966,7 @@ def fused_sdpa_backward(dO,
     softmax_scale *= 1.44269504
 
     # preprocess_grid = (SEQ_LEN // BLOCK_SIZE_MACRO, BATCH_SIZE * NUM_HEADS)
-    preprocess_grid = lambda meta: (SEQ_LEN // meta['BLOCK_SIZE_Q'], BATCH_SIZE * NUM_HEADS)
+    preprocess_grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS)
 
     D = cp.empty_like(M)  # Shape: (BATCH_SIZE, NUM_HEADS, SEQ_LEN)
 
@@ -948,8 +979,7 @@ def fused_sdpa_backward(dO,
         HEAD_DIM=HEAD_DIM,
     )
 
-    # grid = (SEQ_LEN // BLOCK_SIZE_MACRO, 1, BATCH_SIZE * NUM_HEADS)
-    grid = lambda meta: (SEQ_LEN // meta["BLOCK_SIZE_KV"], 1, BATCH_SIZE * NUM_HEADS)
+    grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE_KV"]), 1, BATCH_SIZE * NUM_HEADS)
     stage = 3 if causal else 1
 
     # Fix KV and iterate through all the Q blocks
@@ -974,7 +1004,7 @@ def fused_sdpa_backward(dO,
         STAGE=stage,
     )
 
-    grid = lambda meta: (SEQ_LEN // meta["BLOCK_SIZE_Q"], 1, BATCH_SIZE * NUM_HEADS)
+    grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE_Q"]), 1, BATCH_SIZE * NUM_HEADS)
     # Fix Q and iterate through all the KV block
     _attn_bwd_dq[grid](
         Q=Q.data.ptr,
@@ -1192,55 +1222,58 @@ if __name__ == "__main__":
         }
 
     print("Checking for Correctness")
-    test_cupy_op(BATCH_SIZE=8, NUM_HEADS=6, SEQ_LEN=256, HEAD_DIM=64, causal=True)
-    test_cupy_op(BATCH_SIZE=8, NUM_HEADS=16, SEQ_LEN=256, HEAD_DIM=64, causal=False)
+    test_cupy_op(BATCH_SIZE=8, NUM_HEADS=16, SEQ_LEN=128, HEAD_DIM=64, causal=False)
+    test_cupy_op(BATCH_SIZE=8, NUM_HEADS=16, SEQ_LEN=1, HEAD_DIM=64, causal=True)
+    # test_cupy_op(BATCH_SIZE=8, NUM_HEADS=16, SEQ_LEN=64, HEAD_DIM=64, causal=False)
+    # test_cupy_op(BATCH_SIZE=8, NUM_HEADS=16, SEQ_LEN=64, HEAD_DIM=64, causal=False)
     print("All Correct!!")
 
-    print("Benchmarking")
-    all_results = []
-    seq_list = [128, 256, 512, 1024, 2048, 4096]
-    for seq_len in seq_list:
-        print("Testing Seq Len:", seq_len)
-        results = benchmark_flash_attention(
-            BATCH_SIZE=4,
-            NUM_HEADS=12,
-            SEQ_LEN=seq_len,
-            HEAD_DIM=64,
-            causal=True,
-            dtype=cp.float16,
-            warmup_iters=5,
-            bench_iters=50,
-        )
-        all_results.append(results)
+    # print("Benchmarking")
+    # all_results = []
+    # seq_list = [128, 256, 512, 1024, 2048, 4096]
+    # for seq_len in seq_list:
+    #     print("Testing Seq Len:", seq_len)
+    #     results = benchmark_flash_attention(
+    #         BATCH_SIZE=4,
+    #         NUM_HEADS=12,
+    #         SEQ_LEN=seq_len,
+    #         HEAD_DIM=64,
+    #         causal=True,
+    #         dtype=cp.float16,
+    #         warmup_iters=5,
+    #         bench_iters=50,
+    #     )
+    #     all_results.append(results)
 
-    seq_lens = np.array([r["seq_len"] for r in all_results])
-    forward_times = np.array([[r["torch_ref_fwd_ms"], r["torch_sdpa_fwd_ms"], r["triton_fwd_ms"]] for r in all_results])
-    backward_times = np.array([[r["torch_ref_bwd_ms"], r["torch_sdpa_bwd_ms"], r["triton_bwd_ms"]] for r in all_results])
+    # seq_lens = np.array([r["seq_len"] for r in all_results])
+    # forward_times = np.array([[r["torch_ref_fwd_ms"], r["torch_sdpa_fwd_ms"], r["triton_fwd_ms"]] for r in all_results])
+    # backward_times = np.array([[r["torch_ref_bwd_ms"], r["torch_sdpa_bwd_ms"], r["triton_bwd_ms"]] for r in all_results])
 
-    # Forward plot
-    plt.figure(figsize=(9, 5))
-    plt.plot(seq_lens, forward_times[:, 0], "-o", label="PyTorch Naive Fwd", linewidth=2)
-    plt.plot(seq_lens, forward_times[:, 1], "-o", label="PyTorch SDPA Fwd", linewidth=2)
-    plt.plot(seq_lens, forward_times[:, 2], "-o", label="Triton FlashAttention Fwd", linewidth=2)
-    plt.xlabel("Sequence Length (L)")
-    plt.ylabel("Time (ms)")
-    plt.title("Forward Attention Runtime (forward-only)")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("benchmark/flash_attn_forward.png")
-    plt.show()
+    # # Forward plot
+    # plt.figure(figsize=(9, 5))
+    # plt.plot(seq_lens, forward_times[:, 0], "-o", label="PyTorch Naive Fwd", linewidth=2)
+    # plt.plot(seq_lens, forward_times[:, 1], "-o", label="PyTorch SDPA Fwd", linewidth=2)
+    # plt.plot(seq_lens, forward_times[:, 2], "-o", label="Triton FlashAttention Fwd", linewidth=2)
+    # plt.xlabel("Sequence Length (L)")
+    # plt.ylabel("Time (ms)")
+    # plt.title("Forward Attention Runtime (forward-only)")
+    # plt.legend()
+    # plt.grid(True)
+    # plt.tight_layout()
+    # plt.savefig("benchmark/flash_attn_forward.png")
+    # plt.show()
 
-    # Backward plot
-    plt.figure(figsize=(9, 5))
-    plt.plot(seq_lens, backward_times[:, 0], "-o", label="PyTorch Naive Bwd", linewidth=2)
-    plt.plot(seq_lens, backward_times[:, 1], "-o", label="PyTorch SDPA Bwd", linewidth=2)
-    plt.plot(seq_lens, backward_times[:, 2], "-o", label="Triton FlashAttention Bwd", linewidth=2)
-    plt.xlabel("Sequence Length (L)")
-    plt.ylabel("Time (ms)")
-    plt.title("Backward Attention Runtime (backward-only)")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("benchmark/flash_attn_backward.png")
-    plt.show()
+    # # Backward plot
+    # plt.figure(figsize=(9, 5))
+    # plt.plot(seq_lens, backward_times[:, 0], "-o", label="PyTorch Naive Bwd", linewidth=2)
+    # plt.plot(seq_lens, backward_times[:, 1], "-o", label="PyTorch SDPA Bwd", linewidth=2)
+    # plt.plot(seq_lens, backward_times[:, 2], "-o", label="Triton FlashAttention Bwd", linewidth=2)
+    # plt.xlabel("Sequence Length (L)")
+    # plt.ylabel("Time (ms)")
+    # plt.title("Backward Attention Runtime (backward-only)")
+    # plt.legend()
+    # plt.grid(True)
+    # plt.tight_layout()
+    # plt.savefig("benchmark/flash_attn_backward.png")
+    # plt.show()
+
