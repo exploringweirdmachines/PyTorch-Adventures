@@ -157,32 +157,103 @@ def cross_entropy_backward(
     # Store to correct location
     tl.store(grad_ptr + col_offsets, y, mask=mask)
 
+# def fused_cross_entropy_forward(logits, labels):
+#     N, C = logits.shape
+#     loss = cp.zeros(N, dtype=cp.float32)
+#     logsumexp = cp.zeros(N, dtype=cp.float32)
+
+#     BLOCK_SIZE = triton.next_power_of_2(C)
+
+#     row_stride = logits.strides[0] // logits.itemsize
+
+#     grid = (N,)
+#     cross_entropy_forward[grid](
+#             logits.data.ptr, 
+#             row_stride, 
+#             loss.data.ptr, 
+#             logsumexp.data.ptr, 
+#             labels.data.ptr, 
+#             C, 
+#             BLOCK_SIZE
+#     )       
+    
+#     return loss, logsumexp
+
+# def fused_cross_entropy_backward(
+#         logits, labels, logsumexp, BLOCK_SIZE=128
+# ):
+    
+#     """
+#     Block size should definitely be tuned, but i just pick something
+#     reasonable here for now! We will chunk our NUM_CLASSES len vector
+#     into chunks of BLOCK_SIZE
+
+#     Also, this is the last thing in our model. There is no more
+#     ops after Cross Entropy. So our dloss is just a bunch of ones!
+#     We can create that in here manually as our "upstream" grad. We 
+#     already do this in our .backward() in our tensor, but that only
+#     returns a single 1
+#     """
+#     N, C = logits.shape
+#     row_stride = logits.strides[0] // logits.itemsize
+    
+#     grad = cp.zeros_like(logits, dtype=cp.float32)
+
+#     grid = (N, triton.cdiv(C, BLOCK_SIZE))
+#     cross_entropy_backward[grid](
+#         logits.data.ptr,
+#         row_stride,
+#         grad.data.ptr, 
+#         logsumexp.data.ptr, 
+#         labels.data.ptr, 
+#         C, 
+#         BLOCK_SIZE
+#     )
+
+#     return grad
+
+import torch
+    
 def fused_cross_entropy_forward(logits, labels):
+    # Detect tensor type
+    is_torch = isinstance(logits, torch.Tensor)
+    is_cupy = not is_torch and hasattr(logits, '__cuda_array_interface__')
+    
+    # Convert CuPy to PyTorch for better Triton performance
+    if is_cupy:
+        logits = from_dlpack(logits)
+        labels = from_dlpack(labels)
+    
     N, C = logits.shape
-    loss = cp.zeros(N, dtype=cp.float32)
-    logsumexp = cp.zeros(N, dtype=cp.float32)
+    loss = torch.zeros(N, dtype=torch.float32, device=logits.device)
+    logsumexp = torch.zeros(N, dtype=torch.float32, device=logits.device)
 
     BLOCK_SIZE = triton.next_power_of_2(C)
-
-    row_stride = logits.strides[0] // logits.itemsize
+    row_stride = logits.stride(0)
 
     grid = (N,)
     cross_entropy_forward[grid](
-            logits.data.ptr, 
-            row_stride, 
-            loss.data.ptr, 
-            logsumexp.data.ptr, 
-            labels.data.ptr, 
-            C, 
-            BLOCK_SIZE
-    )       
+        logits, 
+        row_stride, 
+        loss, 
+        logsumexp, 
+        labels, 
+        C, 
+        BLOCK_SIZE
+    )
+    
+    # Convert back to CuPy if needed
+    if is_cupy:
+        import cupy as cp
+        loss = cp.from_dlpack(loss)
+        logsumexp = cp.from_dlpack(logsumexp)
     
     return loss, logsumexp
 
+from torch.utils.dlpack import from_dlpack
 def fused_cross_entropy_backward(
         logits, labels, logsumexp, BLOCK_SIZE=128
 ):
-    
     """
     Block size should definitely be tuned, but i just pick something
     reasonable here for now! We will chunk our NUM_CLASSES len vector
@@ -194,24 +265,40 @@ def fused_cross_entropy_backward(
     already do this in our .backward() in our tensor, but that only
     returns a single 1
     """
-    N, C = logits.shape
-    row_stride = logits.strides[0] // logits.itemsize
     
-    grad = cp.zeros_like(logits, dtype=cp.float32)
+    # Detect tensor type
+    is_torch = isinstance(logits, torch.Tensor)
+    is_cupy = not is_torch and hasattr(logits, '__cuda_array_interface__')
+    
+    # Convert CuPy to PyTorch for better Triton performance
+    if is_cupy:
+        
+        logits = from_dlpack(logits)
+        labels = from_dlpack(labels)
+        logsumexp = from_dlpack(logsumexp)
+    
+    N, C = logits.shape
+    row_stride = logits.stride(0)
+    
+    grad = torch.zeros_like(logits, dtype=torch.float32)
 
     grid = (N, triton.cdiv(C, BLOCK_SIZE))
     cross_entropy_backward[grid](
-        logits.data.ptr,
+        logits,
         row_stride,
-        grad.data.ptr, 
-        logsumexp.data.ptr, 
-        labels.data.ptr, 
+        grad, 
+        logsumexp, 
+        labels, 
         C, 
         BLOCK_SIZE
     )
 
+    # Convert back to CuPy if needed
+    if is_cupy:
+        import cupy as cp
+        grad = cp.from_dlpack(grad)
+
     return grad
-    
 
 if __name__ == "__main__":
 
