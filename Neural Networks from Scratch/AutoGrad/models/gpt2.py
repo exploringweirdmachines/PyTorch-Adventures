@@ -33,7 +33,7 @@ class Embeddings(nn.Module):
 
 class Attention(nn.Module):
 
-    def __init__(self, embed_dim, num_heads, attn_dropout_p=0.1, use_bias=True):
+    def __init__(self, embed_dim, num_heads, attn_dropout_p=0.1, use_bias=True, fused=False):
         super().__init__()
         ### Sanity Checks ###
         assert embed_dim % num_heads == 0, "Double check embedding dim divisible by number of heads"
@@ -42,6 +42,7 @@ class Attention(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
+        self.fused = fused
 
         # ### Attention Projections ###
         self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=use_bias)
@@ -68,19 +69,22 @@ class Attention(nn.Module):
         # Chunk last dim into q, k, v
         q, k, v = mytorch.chunk(qkv, 3, dim=-1)  # each [batch, num_heads, seq_len, head_dim]
 
-        # # Compute attention scores
-        # scores = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        if not self.fused:
+        # Compute attention scores
+            scores = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
 
-        # if attention_mask is not None:
-        #     scores = scores + attention_mask.astype(scores.data.dtype)
+            if attention_mask is not None:
+                scores = scores + attention_mask.astype(scores.data.dtype)
 
-        # attention = self.softmax(scores, dim=-1)
-        # attention = self.attn_drop(attention)
+            attention = self.softmax(scores, dim=-1)
+            attention = self.attn_drop(attention)
 
-        # # Attention output
-        # output = attention @ v
+            # Attention output
+            output = attention @ v
 
-        output = F.scaled_dot_product_attention(q, k, v, causal=True)
+        else:
+            output = F.scaled_dot_product_attention(q, k, v, causal=True)
+            
         output = output.transpose(1, 2).reshape(batch, seq_len, embed_dim)
         # Output projection
         output = self.out_proj(output)
