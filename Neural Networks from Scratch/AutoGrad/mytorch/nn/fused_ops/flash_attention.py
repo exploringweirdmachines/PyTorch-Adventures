@@ -33,11 +33,7 @@ def _attn_fwd_inner(
     offs_q: tl.constexpr,
     offs_kv: tl.constexpr,
     SEQ_LEN,
-    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
-    USE_DROPOUT,
-    SEED, 
-    batch_head_offset, 
-    dropout_p
+    DTYPE_FLAG: tl.constexpr # 0 for float32, 1 for float16
 ):      
     """
     The inner loop of the forward flash attention method grabs a chunk of queries
@@ -153,28 +149,6 @@ def _attn_fwd_inner(
         ### and we already adjusted for this earlier! ###
         P_block = tl.math.exp2(QK_block)
 
-        ### Seeded dropouton P_block ###
-        if USE_DROPOUT:
-
-            ### Generate unique seed for each element in the block of attention matrix ###
-            ### In the backward pass we have to generate the SAME seeds so we can ensure ###
-            ### that we can reproduce our dropout mask. This allows us to save memory as we no ###
-            ### longer need to store a massive dropout mask and can just "recompute" it later ###
-            dropout_seed = SEED + batch_head_offset
-
-            ### Create an offset for each position in the P_block ###
-            ### (BLOCK_SIZE_Q x 1) * SEQ_LEN + (1 x BLOCK_SIZE_KV)
-            ### This will give a 2d grid of indexes in the shape of 
-            ### (BLOCK_SIZE_Q x BLOCK_SIZE_KV) which is exactly our shape of a block of attention 
-            dropout_offsets = offs_q[:, None] * SEQ_LEN + kv_indices[None, :]
-
-            ### Generat Random Values (pseudo random) ###
-            random_values = tl.rand(dropout_seed, dropout_offsets)
-
-            ### Apply Dropout Mask ###
-            dropout_mask = random_values > dropout_p
-            P_block = tl.where(dropout_mask, P_block / (1.0 - dropout_p), 0.0)
-
         ### Compute the sum of the rows for this block ###
         l_ij = tl.sum(P_block, 1)
 
@@ -208,8 +182,8 @@ def _attn_fwd_inner(
             num_stages=num_stages,
             num_warps=num_warps,
         )
-        for BLOCK_SIZE_Q in [32,]
-        for BLOCK_SIZE_KV in [64]
+        for BLOCK_SIZE_Q in [32]
+        for BLOCK_SIZE_KV in [32]
         for num_stages in [2]
         for num_warps in [4]
     ],
@@ -240,9 +214,6 @@ def _attn_fwd(
     BLOCK_SIZE_KV: tl.constexpr,
     ATTN_MODE: tl.constexpr, # 0 for non_causal, 1 for causal
     DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
-    USE_DROPOUT,
-    dropout_p,
-    SEED 
 ):  
     """
     Main forward method for Flash Attention, where for a block of queries
@@ -391,11 +362,6 @@ def _attn_fwd(
     Q_block *= softmax_scale
     Q_block = Q_block.to(tl.float32 if DTYPE_FLAG == 0 else tl.float16)
 
-    ### Get the batch_head offset to tell us which sample and which head we are processing in this block ###
-    ### this will be needed for seeding our random generator so we can replacate the same dropout positions in the ###
-    ### forward and backward pass. Because this is self attention, we have SEQ_LEN x SEQ_LEN items in each Batch/Head ###
-    batch_head_offset = index_batch_head * SEQ_LEN * SEQ_LEN
-
     ### If we are causal (ATTN_MODE==1) then we only process the pre-diagonal stuff (pass_type==0) ###
     ### otherwise we process everything (full attention) ###
     pass_type = 0 if ATTN_MODE == 1 else 2
@@ -413,11 +379,7 @@ def _attn_fwd(
         offs_q, 
         offs_kv, 
         SEQ_LEN,
-        DTYPE_FLAG,
-        USE_DROPOUT,
-        SEED, 
-        batch_head_offset, 
-        dropout_p
+        DTYPE_FLAG
     )
 
     ### IF we are causal, we need to separately handle the diagonal ###
@@ -480,11 +442,7 @@ def _attn_fwd(
             offs_q, 
             offs_kv, 
             SEQ_LEN,
-            DTYPE_FLAG,
-            USE_DROPOUT,
-            SEED, 
-            batch_head_offset, 
-            dropout_p
+            DTYPE_FLAG
         )
 
     ### Store this as we need it for logsumexp in the backward pass ###
@@ -513,8 +471,8 @@ def _attn_fwd(
             num_warps=num_warps,
         )
         for BLOCK_SIZE in [64]
-        for num_stages in [2]
-        for num_warps in [4]
+        for num_stages in [3]
+        for num_warps in [8]
     ],
     key=["SEQ_LEN", "EMBED_DIM"],
 )
@@ -590,11 +548,7 @@ def _attn_bwd_dk_dv(
     num_steps, 
     ln2, 
     MASK: tl.constexpr,
-    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
-    USE_DROPOUT,
-    SEED, 
-    batch_head_offset, 
-    dropout_p
+    DTYPE_FLAG: tl.constexpr # 0 for float32, 1 for float16
 ):
     """
     Main method to compute the grads for dK,dV in blocks. This basically
@@ -660,36 +614,6 @@ def _attn_bwd_dk_dv(
             ### Set our invalid positions to 0 ###
             P_T_block = tl.where(mask_block, P_T_block, 0.)
 
-        ### If we had a dropout in the forward pass we need to make sure to dropout the ###
-        ### samle locations in the backward pass. We do this in a memory efficient way ###
-        ### by leveraging seeding rather than storing a large binary mask in memory ###
-
-        ### I dont like this but Tritons compiler cant track context ### 
-        ### So if dropout_mask exists in my first USE_DROPOUT if statement ###
-        #### the compiler doesnt know that it exists again later in the second block ###
-        ### instead of recomputing the sampling again, this seems to be faster so ###
-        ### lets go with it !!!
-
-        ### I have a discussion started here to find a better solution! https://github.com/triton-lang/triton/discussions/8419
-        dropout_mask = tl.full((BLOCK_SIZE_COL, BLOCK_SIZE_ROW), True, tl.int1)
-        if USE_DROPOUT:
-
-            ### Get exactly the same seed for this specific batch/head offset
-            dropout_seed = SEED + batch_head_offset
-            
-            ### Compute our per index seed BUT we need a transposed version as we have a ###
-            ### transposed P_T here. So we do 
-            ### (1 x NUM_QUERIES) * SEQ_LEN + (NUM_KEYS x 1) -> (NUM_KEYS x NUM_QUERIES) block
-            dropout_offset = offsets_row[None, :] * SEQ_LEN + offsets_col[:, None]
-
-            ### Get our seeded mask ###
-            random_vals = tl.rand(dropout_seed, dropout_offset)
-            dropout_mask = random_vals > dropout_p
-            
-            ### Remove these values from P_T ###
-            P_T_block = tl.where(dropout_mask, P_T_block / (1.0 - dropout_p), 0.0)
-
-
         ### Now we start to accumulate grads. Each block of the output contribute to our 
         ### gradient for dV. dV is P^T @ dO
         ### But we are not processing all of our sequence length at once, only chunks of it
@@ -699,12 +623,6 @@ def _attn_bwd_dk_dv(
 
         ### dP = dO @ V^T, but we want dP^T so we transpose the right side and get [dO @ V^T]^T = V @ dO^T
         dP_T_block = tl.dot(V, tl.trans(dO_block))        
-
-        if USE_DROPOUT:
-
-            ### If our P_T had a dropout, then we need to make sure that our gradients also have a dropout on ###
-            ### those same positions so we apply that here! ###
-            dP_T_block = tl.where(dropout_mask, dP_T_block / (1.0 - dropout_p), 0.0)
 
         ### Then our dS = P*(dP - D) but we again have all transposes so we just use our transpoed P and dP
         ### D is just a row vector that is the broadcasted over, so we add an extra dimension to make it (1 x Micro)
@@ -732,11 +650,7 @@ def _attn_bwd_dq(
     num_steps, 
     ln2: tl.constexpr, 
     MASK: tl.constexpr,
-    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
-    USE_DROPOUT,
-    SEED, 
-    batch_head_offset, 
-    dropout_p
+    DTYPE_FLAG: tl.constexpr # 0 for float32, 1 for float16
 ):
     """
     Nearly identical for _attn_bwd_dk_dv but now we have a block of Q and are 
@@ -770,25 +684,8 @@ def _attn_bwd_dq(
             mask = offsets_row[:, None] >= offsets_col[None, :]
             P = tl.where(mask, P, 0.)
 
-        ### Same setup as before, but now we have P, rather than P_T so no need ###
-        ### do get transposed indexes anymore ###
-        dropout_mask = tl.full((BLOCK_SIZE_ROW, BLOCK_SIZE_COL), True, tl.int1)
-        if USE_DROPOUT:
-            dropout_seed = SEED + batch_head_offset
-            
-            ### (NUM_QUERIES x 1) * SEQ_LEN + (1 x NUM_KEYS) -> (NUM_QUERIES x NUM_KEYS)
-            dropout_offset = offsets_row[:, None] * SEQ_LEN + offsets_col[None, :]
-            
-            random_vals = tl.rand(dropout_seed, dropout_offset)
-            dropout_mask = random_vals > dropout_p
-            P = tl.where(dropout_mask, P / (1.0 - dropout_p), 0.0)
-
-        # Same formulation for dQ
+        ### Same formulation just for dQ now ###
         dP = tl.dot(dO, V_T_block)
-
-        if USE_DROPOUT:
-            dP = tl.where(dropout_mask, dP / (1.0 - dropout_p), 0.0)
-
         dS = P * (dP - D_block[:, None]) * ln2
         dQ = tl.dot(dS.to(tl.float32 if DTYPE_FLAG == 0 else tl.float16), tl.trans(K_T_block), acc=dQ)
 
@@ -803,10 +700,10 @@ def _attn_bwd_dq(
     [
         triton.Config({"BLOCK_SIZE_MACRO": BLOCK_SIZE_MACRO, "BLOCK_SIZE_MICRO": BLOCK_SIZE_MICRO},
                         num_stages=num_stages, num_warps=num_warps,)
-        for BLOCK_SIZE_MICRO in [32,]
+        for BLOCK_SIZE_MICRO in [32]
         for BLOCK_SIZE_MACRO in [64]
-        for num_stages in [2]
-        for num_warps in [4]
+        for num_stages in [4]
+        for num_warps in [4,]
     ],
     key=["SEQ_LEN", "HEAD_DIM"],
 )
@@ -829,14 +726,9 @@ def _attn_bwd(
     BLOCK_SIZE_MICRO: tl.constexpr,
     BLOCK_SIZE_MACRO: tl.constexpr,
     CAUSAL: tl.constexpr, # 1 for causal, 0 for noncausal 
-    DTYPE_FLAG: tl.constexpr, # 0 for float32 1 for float16
-    USE_DROPOUT, # Just a flag (redundant as we could just check if dropout_p > 0.0)
-    SEED,  # We need to use the same seed in the fwd and bwd pass so we give that here
-    dropout_p # if passed in as 0.0, no dropout will be applied
+    DTYPE_FLAG: tl.constexpr # 0 for float32 1 for float16
 ):
     
-    ### Its easiest if our MACRO BLOCKS are divisible my MICRO BLOCKS ###
-    ### This was when we do inner block computations everything is divisible! ###
     tl.static_assert(BLOCK_SIZE_MACRO % BLOCK_SIZE_MICRO == 0)
 
     ### Store our Contants for scaling due to exp2 vs exp difference ###
@@ -876,8 +768,6 @@ def _attn_bwd(
     dV_ptr += offset_batch_head_4d
     M_ptr += offset_batch_head_3d
     D_ptr += offset_batch_head_3d
-
-    batch_head_offset = index_batch_head * SEQ_LEN * SEQ_LEN
 
     ###################### dK dV #####################
 
@@ -952,11 +842,7 @@ def _attn_bwd(
         start_row, start_col, num_steps, 
         ln2, 
         MASK=(CAUSAL==1),
-        DTYPE_FLAG=DTYPE_FLAG,
-        USE_DROPOUT=USE_DROPOUT,
-        SEED=SEED, 
-        batch_head_offset=batch_head_offset, 
-        dropout_p=dropout_p
+        DTYPE_FLAG=DTYPE_FLAG
     )
 
     ### STAGE 2: Process Under the Diagonal Block for Causal###
@@ -998,11 +884,7 @@ def _attn_bwd(
             start_row, start_col, num_steps, 
             ln2, 
             MASK=False,
-            DTYPE_FLAG=DTYPE_FLAG,
-            USE_DROPOUT=USE_DROPOUT,
-            SEED=SEED, 
-            batch_head_offset=batch_head_offset, 
-            dropout_p=dropout_p
+            DTYPE_FLAG=DTYPE_FLAG
         )
 
     ### We didnt apply this scaling in our loop (as its just a constant) ###
@@ -1071,11 +953,7 @@ def _attn_bwd(
         start_row, start_col, num_steps, 
         ln2, 
         MASK=(CAUSAL==1),  # Only mask for diagonal
-        DTYPE_FLAG=DTYPE_FLAG,
-        USE_DROPOUT=USE_DROPOUT,
-        SEED=SEED, 
-        batch_head_offset=batch_head_offset, 
-        dropout_p=dropout_p
+        DTYPE_FLAG=DTYPE_FLAG
     )
 
     ### Second pass (only for causal models) ###
@@ -1092,11 +970,7 @@ def _attn_bwd(
             start_row, start_col, num_steps, 
             ln2,
             MASK=False,
-            DTYPE_FLAG=DTYPE_FLAG,
-            USE_DROPOUT=USE_DROPOUT,
-            SEED=SEED, 
-            batch_head_offset=batch_head_offset, 
-            dropout_p=dropout_p
+            DTYPE_FLAG=DTYPE_FLAG
         )
 
     ### Scale our grads with the same factor ###
@@ -1106,8 +980,7 @@ def _attn_bwd(
 
 def fused_sdpa_forward(Q, K, V, 
                        causal, 
-                       softmax_scale=None,
-                       dropout_p=0.0):
+                       softmax_scale=None):
     
     HEAD_DIM_Q, HEAD_DIM_K = Q.shape[-1], K.shape[-1]
     HEAD_DIM_V = V.shape[-1]
@@ -1125,8 +998,6 @@ def fused_sdpa_forward(Q, K, V,
 
     if softmax_scale is None:
         softmax_scale = 1 / HEAD_DIM**0.5
-
-    seed = cp.random.randint(0, 2**31 - 1).item()
 
     O = cp.empty_like(Q)
     grid = lambda args: (triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
@@ -1159,21 +1030,19 @@ def fused_sdpa_forward(Q, K, V,
         SEQ_LEN=SEQ_LEN,
         HEAD_DIM=HEAD_DIM_Q,
         ATTN_MODE=1 if causal else 0,
-        DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1,
-        dropout_p=dropout_p,
-        SEED=seed,
-        USE_DROPOUT=dropout_p > 0.0,
+        DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1
     )
 
-    return Q, K, V, O, M, seed
+    return Q, K, V, O, M
+
+from torch.utils.dlpack import from_dlpack
+
 
 def fused_sdpa_backward(dO, 
                         Q, K, V, 
                         O, M, 
                         causal,
-                        softmax_scale=None,
-                        dropout_p=0.0, 
-                        seed=None):
+                        softmax_scale=None):
 
     HEAD_DIM_Q, HEAD_DIM_K = Q.shape[-1], K.shape[-1]
     HEAD_DIM_V = V.shape[-1]
@@ -1181,9 +1050,6 @@ def fused_sdpa_backward(dO,
     assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
     assert Q.dtype == K.dtype and K.dtype == V.dtype and V.dtype == O.dtype, "Expect all Q,K,V,O Tensors to have the same data type"
 
-    if dropout_p > 0.0 and seed is None:
-        raise ValueError("If dropout is enabled, Seed from forward pass must be provided to backward pass")
-    
     ### Ensure our grads are contiguous ###
     if not dO.flags.c_contiguous:
         dO = cp.ascontiguousarray(dO)
@@ -1246,11 +1112,9 @@ def fused_sdpa_backward(dO,
         SEQ_LEN=SEQ_LEN, 
         HEAD_DIM=HEAD_DIM, 
         CAUSAL=1 if causal else 0, 
-        DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1,
-        USE_DROPOUT=dropout_p>0.0,
-        SEED=seed, 
-        dropout_p=dropout_p
+        DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1
     )
+
 
     return dQ, dK, dV
 
@@ -1429,10 +1293,8 @@ def _dlpack_fused_sdpa_backward(dO,
 if __name__ == "__main__":
     import torch
     import math
-    from torch import from_dlpack
 
     print("TESTING FOR ACCURACY")
-    device = "cuda"
 
     for causal in [True, False]:
         for type in ["float32", "float16"]:
@@ -1621,7 +1483,9 @@ if __name__ == "__main__":
         sm_scale = 1.0 / math.sqrt(HEAD_DIM)
         is_fp16 = dtype=="float16"
         
-
+        # ---------------------------
+        # Preallocate tensors
+        # ---------------------------
         if provider in ["torch", "triton_torch"]:
             q = torch.randn(BATCH, N_HEADS, SEQ_LEN, HEAD_DIM, 
                             dtype=torch.float16 if is_fp16 else torch.float32,
@@ -1646,7 +1510,8 @@ if __name__ == "__main__":
             O_cp = cp.empty_like(q_cp)
             M_cp = cp.empty((BATCH, N_HEADS, SEQ_LEN), dtype=cp.float32)
             
-
+            # Convert to PyTorch (zero-copy, same memory)
+            # Use .__dlpack__() instead of .toDlpack()
             q = from_dlpack(q_cp)
             k = from_dlpack(k_cp)
             v = from_dlpack(v_cp)
@@ -1673,6 +1538,9 @@ if __name__ == "__main__":
             dK = cp.empty_like(k)
             dV = cp.empty_like(v)
         
+        # ---------------------------
+        # Select function
+        # ---------------------------
         if provider=="torch":
             if mode=="fwd":
                 fn = lambda: torch.nn.functional.scaled_dot_product_attention(q,k,v,is_causal=causal)
@@ -1690,9 +1558,14 @@ if __name__ == "__main__":
             else:
                 fn = lambda: _fused_sdpa_backward(dO,q,k,v,O,M,D,dQ,dK,dV,causal=causal, softmax_scale=sm_scale)
         
-
+        # ---------------------------
+        # Benchmark
+        # ---------------------------
         ms = triton.testing.do_bench(fn, warmup=25, rep=100)
         
+        # ---------------------------
+        # Compute TFLOPS
+        # ---------------------------
         flops_per_matmul = 2.0 * BATCH * N_HEADS * SEQ_LEN * SEQ_LEN * HEAD_DIM
         total_flops = 2 * flops_per_matmul
         if mode=="bwd":
