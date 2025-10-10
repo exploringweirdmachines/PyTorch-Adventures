@@ -157,12 +157,18 @@ def _attn_fwd_inner(
         if USE_DROPOUT:
 
             ### Generate unique seed for each element in the block of attention matrix ###
+            ### In the backward pass we have to generate the SAME seeds so we can ensure ###
+            ### that we can reproduce our dropout mask. This allows us to save memory as we no ###
+            ### longer need to store a massive dropout mask and can just "recompute" it later ###
             dropout_seed = SEED + batch_head_offset
 
             ### Create an offset for each position in the P_block ###
+            ### (BLOCK_SIZE_Q x 1) * SEQ_LEN + (1 x BLOCK_SIZE_KV)
+            ### This will give a 2d grid of indexes in the shape of 
+            ### (BLOCK_SIZE_Q x BLOCK_SIZE_KV) which is exactly our shape of a block of attention 
             dropout_offsets = offs_q[:, None] * SEQ_LEN + kv_indices[None, :]
 
-            ### Generat Random Values ###
+            ### Generat Random Values (pseudo random) ###
             random_values = tl.rand(dropout_seed, dropout_offsets)
 
             ### Apply Dropout Mask ###
@@ -663,15 +669,24 @@ def _attn_bwd_dk_dv(
         #### the compiler doesnt know that it exists again later in the second block ###
         ### instead of recomputing the sampling again, this seems to be faster so ###
         ### lets go with it !!!
+
+        ### I have a discussion started here to find a better solution! https://github.com/triton-lang/triton/discussions/8419
         dropout_mask = tl.full((BLOCK_SIZE_COL, BLOCK_SIZE_ROW), True, tl.int1)
         if USE_DROPOUT:
+
+            ### Get exactly the same seed for this specific batch/head offset
             dropout_seed = SEED + batch_head_offset
-            # Note: transposed indices for transposed attention
-            q_offsets_drop = offsets_row[None, :]
-            kv_offsets_drop = offsets_col[:, None]
-            dropout_offset = q_offsets_drop * SEQ_LEN + kv_offsets_drop
+            
+            ### Compute our per index seed BUT we need a transposed version as we have a ###
+            ### transposed P_T here. So we do 
+            ### (1 x NUM_QUERIES) * SEQ_LEN + (NUM_KEYS x 1) -> (NUM_KEYS x NUM_QUERIES) block
+            dropout_offset = offsets_row[None, :] * SEQ_LEN + offsets_col[:, None]
+
+            ### Get our seeded mask ###
             random_vals = tl.rand(dropout_seed, dropout_offset)
             dropout_mask = random_vals > dropout_p
+            
+            ### Remove these values from P_T ###
             P_T_block = tl.where(dropout_mask, P_T_block / (1.0 - dropout_p), 0.0)
 
 
@@ -686,6 +701,9 @@ def _attn_bwd_dk_dv(
         dP_T_block = tl.dot(V, tl.trans(dO_block))        
 
         if USE_DROPOUT:
+
+            ### If our P_T had a dropout, then we need to make sure that our gradients also have a dropout on ###
+            ### those same positions so we apply that here! ###
             dP_T_block = tl.where(dropout_mask, dP_T_block / (1.0 - dropout_p), 0.0)
 
         ### Then our dS = P*(dP - D) but we again have all transposes so we just use our transpoed P and dP
@@ -752,12 +770,15 @@ def _attn_bwd_dq(
             mask = offsets_row[:, None] >= offsets_col[None, :]
             P = tl.where(mask, P, 0.)
 
+        ### Same setup as before, but now we have P, rather than P_T so no need ###
+        ### do get transposed indexes anymore ###
         dropout_mask = tl.full((BLOCK_SIZE_ROW, BLOCK_SIZE_COL), True, tl.int1)
         if USE_DROPOUT:
             dropout_seed = SEED + batch_head_offset
-            q_offsets_drop = offsets_row[:, None]
-            kv_offsets_drop = offsets_col[None, :]
-            dropout_offset = q_offsets_drop * SEQ_LEN + kv_offsets_drop
+            
+            ### (NUM_QUERIES x 1) * SEQ_LEN + (1 x NUM_KEYS) -> (NUM_QUERIES x NUM_KEYS)
+            dropout_offset = offsets_row[:, None] * SEQ_LEN + offsets_col[None, :]
+            
             random_vals = tl.rand(dropout_seed, dropout_offset)
             dropout_mask = random_vals > dropout_p
             P = tl.where(dropout_mask, P / (1.0 - dropout_p), 0.0)
@@ -809,11 +830,13 @@ def _attn_bwd(
     BLOCK_SIZE_MACRO: tl.constexpr,
     CAUSAL: tl.constexpr, # 1 for causal, 0 for noncausal 
     DTYPE_FLAG: tl.constexpr, # 0 for float32 1 for float16
-    USE_DROPOUT,
-    SEED, 
-    dropout_p
+    USE_DROPOUT, # Just a flag (redundant as we could just check if dropout_p > 0.0)
+    SEED,  # We need to use the same seed in the fwd and bwd pass so we give that here
+    dropout_p # if passed in as 0.0, no dropout will be applied
 ):
     
+    ### Its easiest if our MACRO BLOCKS are divisible my MICRO BLOCKS ###
+    ### This was when we do inner block computations everything is divisible! ###
     tl.static_assert(BLOCK_SIZE_MACRO % BLOCK_SIZE_MICRO == 0)
 
     ### Store our Contants for scaling due to exp2 vs exp difference ###
@@ -1406,8 +1429,10 @@ def _dlpack_fused_sdpa_backward(dO,
 if __name__ == "__main__":
     import torch
     import math
+    from torch import from_dlpack
 
     print("TESTING FOR ACCURACY")
+    device = "cuda"
 
     for causal in [True, False]:
         for type in ["float32", "float16"]:
@@ -1596,9 +1621,7 @@ if __name__ == "__main__":
         sm_scale = 1.0 / math.sqrt(HEAD_DIM)
         is_fp16 = dtype=="float16"
         
-        # ---------------------------
-        # Preallocate tensors
-        # ---------------------------
+
         if provider in ["torch", "triton_torch"]:
             q = torch.randn(BATCH, N_HEADS, SEQ_LEN, HEAD_DIM, 
                             dtype=torch.float16 if is_fp16 else torch.float32,
@@ -1623,8 +1646,7 @@ if __name__ == "__main__":
             O_cp = cp.empty_like(q_cp)
             M_cp = cp.empty((BATCH, N_HEADS, SEQ_LEN), dtype=cp.float32)
             
-            # Convert to PyTorch (zero-copy, same memory)
-            # Use .__dlpack__() instead of .toDlpack()
+
             q = from_dlpack(q_cp)
             k = from_dlpack(k_cp)
             v = from_dlpack(v_cp)
@@ -1651,9 +1673,6 @@ if __name__ == "__main__":
             dK = cp.empty_like(k)
             dV = cp.empty_like(v)
         
-        # ---------------------------
-        # Select function
-        # ---------------------------
         if provider=="torch":
             if mode=="fwd":
                 fn = lambda: torch.nn.functional.scaled_dot_product_attention(q,k,v,is_causal=causal)
@@ -1671,14 +1690,9 @@ if __name__ == "__main__":
             else:
                 fn = lambda: _fused_sdpa_backward(dO,q,k,v,O,M,D,dQ,dK,dV,causal=causal, softmax_scale=sm_scale)
         
-        # ---------------------------
-        # Benchmark
-        # ---------------------------
+
         ms = triton.testing.do_bench(fn, warmup=25, rep=100)
         
-        # ---------------------------
-        # Compute TFLOPS
-        # ---------------------------
         flops_per_matmul = 2.0 * BATCH * N_HEADS * SEQ_LEN * SEQ_LEN * HEAD_DIM
         total_flops = 2 * flops_per_matmul
         if mode=="bwd":
