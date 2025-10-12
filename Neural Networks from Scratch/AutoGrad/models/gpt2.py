@@ -33,7 +33,14 @@ class Embeddings(nn.Module):
 
 class Attention(nn.Module):
 
-    def __init__(self, embed_dim, num_heads, attn_dropout_p=0.1, use_bias=True, fused=False):
+    def __init__(self, 
+                 embed_dim, 
+                 num_heads, 
+                 attn_dropout_p=0.1, 
+                 use_bias=True,
+                 auto=True, 
+                 fused=False):
+        
         super().__init__()
         ### Sanity Checks ###
         assert embed_dim % num_heads == 0, "Double check embedding dim divisible by number of heads"
@@ -45,16 +52,18 @@ class Attention(nn.Module):
         self.fused = fused
 
         # ### Attention Projections ###
-        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=use_bias)
-        self.softmax = nn.Softmax()
+        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=use_bias, auto=auto)
+        if not self.fused:
+            self.softmax = nn.Softmax()
         self.attn_drop = nn.Dropout(dropout_p=attn_dropout_p)
 
         ### Post Attention Projection ###
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=auto)
         self.proj_drop = nn.Dropout(dropout_p=attn_dropout_p)
         
 
     def forward(self, x, attention_mask=None):
+  
         batch, seq_len, embed_dim = x.shape
 
         # QKV projection
@@ -70,7 +79,8 @@ class Attention(nn.Module):
         q, k, v = mytorch.chunk(qkv, 3, dim=-1)  # each [batch, num_heads, seq_len, head_dim]
 
         if not self.fused:
-        # Compute attention scores
+
+            # Compute attention scores
             scores = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
 
             if attention_mask is not None:
@@ -86,6 +96,7 @@ class Attention(nn.Module):
             output = F.scaled_dot_product_attention(q, k, v, causal=True)
             
         output = output.transpose(1, 2).reshape(batch, seq_len, embed_dim)
+
         # Output projection
         output = self.out_proj(output)
         output = self.proj_drop(output)
@@ -100,15 +111,16 @@ class FeedForward(nn.Module):
                  embed_dim, 
                  mlp_ratio=4, 
                  mlp_dropout_p=0.1,
-                 use_bias=True):
+                 use_bias=True,
+                 auto=True):
         super().__init__()
         hidden_size = embed_dim * mlp_ratio
 
-        self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias)
+        self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto)
         self.activation = nn.GELU()
         self.intermediate_dropout = nn.Dropout(mlp_dropout_p)
 
-        self.out_proj = nn.Linear(hidden_size, embed_dim, bias=use_bias)
+        self.out_proj = nn.Linear(hidden_size, embed_dim, bias=use_bias, auto=auto)
         self.output_dropout = nn.Dropout(mlp_dropout_p)
 
     def forward(self, x):
@@ -128,12 +140,16 @@ class TransformerBlock(nn.Module):
                  num_heads, 
                  dropout_p, 
                  mlp_ratio=4,
-                 use_bias=True):
+                 use_bias=True,
+                 auto=True,
+                 fused=False):
+        
         super().__init__()
-        self.attention = Attention(embed_dim, num_heads, dropout_p, use_bias)
-        self.layernorm1 = nn.LayerNorm(embed_dim, bias=use_bias)
-        self.feedforward = FeedForward(embed_dim, mlp_ratio, dropout_p, use_bias)
-        self.layernorm2 = nn.LayerNorm(embed_dim, bias=use_bias)
+
+        self.attention = Attention(embed_dim, num_heads, dropout_p, use_bias, auto=auto, fused=fused)
+        self.layernorm1 = nn.LayerNorm(embed_dim, bias=use_bias, auto=auto, fused=fused)
+        self.feedforward = FeedForward(embed_dim, mlp_ratio, dropout_p, use_bias, auto=auto)
+        self.layernorm2 = nn.LayerNorm(embed_dim, bias=use_bias, fused=fused)
 
     def forward(self, x, attention_mask=None):
         
@@ -153,7 +169,9 @@ class GPT2(nn.Module):
                  num_blocks, 
                  dropout_p=0.0, 
                  mlp_ratio=4,
-                 use_bias=True):
+                 use_bias=True,
+                 auto=False, 
+                 fused=True):
         
         super().__init__()
         self.embed_dim = embed_dim
@@ -168,7 +186,9 @@ class GPT2(nn.Module):
                              num_heads=num_heads, 
                              dropout_p=dropout_p, 
                              mlp_ratio=mlp_ratio,
-                             use_bias=use_bias)
+                             use_bias=use_bias, 
+                             auto=auto,
+                             fused=fused)
 
             for _ in range(num_blocks)
         ])

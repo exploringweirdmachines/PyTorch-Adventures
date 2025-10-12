@@ -10,6 +10,12 @@ from ..tensor import Tensor, zeros, ones
 from . import functional as F
 from . import initializations as init
 
+try:
+    import triton
+    FUSED_AVAIL = True
+except:
+    FUSED_AVAIL = False
+
 ######################
 ### Generic Module ###
 ######################
@@ -667,10 +673,18 @@ class AdaptiveAvgPool2d(Module):
 ### NORMALIZATION LAYERS ###
 ############################
 class LayerNorm(Module):
-    def __init__(self, embed_dim, bias=True, auto=False):
+    def __init__(self, embed_dim, bias=True, auto=False, fused=False):
         super().__init__()
         self.embed_dim = embed_dim
         self.auto = auto
+
+        if self.auto and fused:
+            raise Exception("Modules with full autograd cannot be fused, turn off fused")
+
+        if fused and not FUSED_AVAIL:
+            raise Exception("Triton Installation Necessary for Fused Ops")
+        
+        self.fused = fused
         self.weight = ones((embed_dim, ), requires_grad=True)
 
         if bias:
@@ -688,7 +702,7 @@ class LayerNorm(Module):
         return f"{self.embed_dim}"
     
     def forward(self, x):
-        return F.layernorm(x, self.weight, self.bias, auto=self.auto)
+        return F.layernorm(x, self.weight, self.bias, auto=self.auto, fused=self.fused)
     
 class BatchNorm2d(Module):
     def __init__(self, num_features, eps=1e-5, momentum=0.1):
@@ -752,9 +766,16 @@ class GELU(Module):
         return F.gelu(x)
 
 class Softmax(Module):
-    def __init__(self, auto=False, fused=True):
+    def __init__(self, auto=False, fused=False):
         super().__init__()
         self.auto = auto
+
+        if self.auto and fused:
+            raise Exception("Modules with full autograd cannot be fused, turn off fused")
+
+        if fused and not FUSED_AVAIL:
+            raise Exception("Triton Installation Necessary for Fused Ops")
+
         self.fused = fused
 
     def forward(self, x, dim):
@@ -764,11 +785,20 @@ class Softmax(Module):
 ### LOSS FUNCTIONS ###
 ######################
 class CrossEntropyLoss(Module):
-    def __init__(self, auto=False):
+    def __init__(self, auto=False, fused=False):
         super().__init__()
         self.auto = auto
+        
+        if self.auto and fused:
+            raise Exception("Modules with full autograd cannot be fused, turn off fused")
+        
+        if fused and not FUSED_AVAIL:
+            raise Exception("Triton Installation Necessary for Fused Ops")
+        
+        self.fused = fused
+
     def forward(self, logits, targets):
-        return F.cross_entropy(logits, targets, auto=self.auto)
+        return F.cross_entropy(logits, targets, auto=self.auto, fused=self.fused)
     
 class MSELoss(Module):
     def __init__(self, auto=False):
