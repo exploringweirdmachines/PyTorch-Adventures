@@ -14,9 +14,136 @@ This adapts the existing code with Cupy!
 2) NO Dropout on our attention scores! Maybe another feature to come?
 
 """
+import os
 import cupy as cp
 import triton
 import triton.language as tl
+
+def get_fwd_autotune_configs():
+    # Read the autotune mode from environment variable, default to "none"
+    mode = os.getenv("TRITON_FLASH_AUTOTUNE_MODE", "none").lower()
+    
+    if mode == "none":
+        return [
+            triton.Config(
+                {"BLOCK_SIZE_Q": 64, "BLOCK_SIZE_KV": 32},
+                num_stages=2,
+                num_warps=4,
+            )
+        ]
+
+    # Minimal configs for "slow" mode (fewer configurations for faster tuning)
+    if mode == "medium":
+        return [
+            triton.Config(
+                {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
+                num_stages=num_stages,
+                num_warps=num_warps,
+            )
+            for BLOCK_SIZE_Q in [32, 64]  # Reduced set
+            for BLOCK_SIZE_KV in [16, 32]  # Reduced set
+            for num_stages in [2, 3]      # Reduced set
+            for num_warps in [4, 8]      # Reduced set
+            if BLOCK_SIZE_KV < BLOCK_SIZE_Q
+        ]
+    # Comprehensive configs for "max" mode (full search space)
+    else:  # mode == "max" or any other value defaults to max
+        return [
+            triton.Config(
+                {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
+                num_stages=num_stages,
+                num_warps=num_warps,
+            )
+            for BLOCK_SIZE_Q in [16, 32, 64, 128]
+            for BLOCK_SIZE_KV in [16, 32, 64]
+            for num_stages in [2, 3, 4]
+            for num_warps in [4, 8, 16]
+            if BLOCK_SIZE_KV < BLOCK_SIZE_Q
+        ]
+
+def get_preprocess_autotune_configs():
+    # Read the autotune mode from environment variable, default to "none"
+    mode = os.getenv("TRITON_FLASH_AUTOTUNE_MODE", "none").lower()
+    
+    # Single config for "none" mode (no autotuning, fixed configuration)
+    if mode == "none":
+        return [
+            triton.Config(
+                {"BLOCK_SIZE": 64},
+                num_stages=2,
+                num_warps=4,
+            )
+        ]
+    
+    # Reduced configs for "medium" mode (fewer configurations for faster tuning)
+    if mode == "medium":
+        return [
+            triton.Config(
+                {"BLOCK_SIZE": BLOCK_SIZE},
+                num_stages=num_stages,
+                num_warps=num_warps,
+            )
+            for BLOCK_SIZE in [32, 64]  # Reduced set
+            for num_stages in [2, 3]    # Reduced set
+            for num_warps in [4, 8]     # Reduced set
+        ]
+    
+    # Comprehensive configs for "max" mode (full search space)
+    else:  # mode == "max" or any other value defaults to max
+        return [
+            triton.Config(
+                {"BLOCK_SIZE": BLOCK_SIZE},
+                num_stages=num_stages,
+                num_warps=num_warps,
+            )
+            for BLOCK_SIZE in [16, 32, 64, 128]
+            for num_stages in [2, 3, 4]
+            for num_warps in [4, 8, 16]
+        ]
+
+def get_bwd_autotune_configs():
+    # Read the autotune mode from environment variable, default to "none"
+    mode = os.getenv("TRITON_FLASH_AUTOTUNE_MODE", "none").lower()
+    
+    # Single config for "none" mode (no autotuning, fixed configuration)
+    if mode == "none":
+        return [
+            triton.Config(
+                {"BLOCK_SIZE_MACRO": 64, "BLOCK_SIZE_MICRO": 32},
+                num_stages=2,
+                num_warps=4,
+            )
+        ]
+    
+    # Reduced configs for "medium" mode (fewer configurations for faster tuning)
+    if mode == "medium":
+        return [
+            triton.Config(
+                {"BLOCK_SIZE_MACRO": BLOCK_SIZE_MACRO, "BLOCK_SIZE_MICRO": BLOCK_SIZE_MICRO},
+                num_stages=num_stages,
+                num_warps=num_warps,
+            )
+            for BLOCK_SIZE_MACRO in [32, 64]  # Reduced set
+            for BLOCK_SIZE_MICRO in [16, 32]  # Reduced set
+            for num_stages in [2, 3]         # Reduced set
+            for num_warps in [4, 8]          # Reduced set
+            if BLOCK_SIZE_MICRO < BLOCK_SIZE_MACRO
+        ]
+    
+    # Comprehensive configs for "max" mode (full search space)
+    else:  # mode == "max" or any other value defaults to max
+        return [
+            triton.Config(
+                {"BLOCK_SIZE_MACRO": BLOCK_SIZE_MACRO, "BLOCK_SIZE_MICRO": BLOCK_SIZE_MICRO},
+                num_stages=num_stages,
+                num_warps=num_warps,
+            )
+            for BLOCK_SIZE_MACRO in [16, 32, 64, 128]
+            for BLOCK_SIZE_MICRO in [16, 32, 64]
+            for num_stages in [2, 3, 4]
+            for num_warps in [4, 8, 16]
+            if BLOCK_SIZE_MICRO < BLOCK_SIZE_MACRO
+        ]
 
 @triton.jit
 def _attn_fwd_inner(
@@ -176,17 +303,7 @@ def _attn_fwd_inner(
     return O_block, l_i, m_i
 
 @triton.autotune(
-    [
-        triton.Config(
-            {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
-            num_stages=num_stages,
-            num_warps=num_warps,
-        )
-        for BLOCK_SIZE_Q in [32]
-        for BLOCK_SIZE_KV in [32]
-        for num_stages in [2]
-        for num_warps in [4]
-    ],
+    configs=get_fwd_autotune_configs(),
     key=["SEQ_LEN", "HEAD_DIM"],
 )
 @triton.jit
@@ -464,17 +581,8 @@ def _attn_fwd(
     tl.store(O_block_ptr, O_block.to(O.type.element_ty), boundary_check=(0,))
 
 @triton.autotune(
-    [
-        triton.Config(
-            {"BLOCK_SIZE": BLOCK_SIZE,},
-            num_stages=num_stages,
-            num_warps=num_warps,
-        )
-        for BLOCK_SIZE in [64]
-        for num_stages in [3]
-        for num_warps in [8]
-    ],
-    key=["SEQ_LEN", "EMBED_DIM"],
+    configs=get_preprocess_autotune_configs(),
+    key=["SEQ_LEN", "HEAD_DIM"],
 )
 @triton.jit
 def attn_backward_preprocess(
@@ -697,14 +805,7 @@ def _attn_bwd_dq(
     return dQ
 
 @triton.autotune(
-    [
-        triton.Config({"BLOCK_SIZE_MACRO": BLOCK_SIZE_MACRO, "BLOCK_SIZE_MICRO": BLOCK_SIZE_MICRO},
-                        num_stages=num_stages, num_warps=num_warps,)
-        for BLOCK_SIZE_MICRO in [32]
-        for BLOCK_SIZE_MACRO in [64]
-        for num_stages in [4]
-        for num_warps in [4,]
-    ],
+    configs=get_bwd_autotune_configs(),
     key=["SEQ_LEN", "HEAD_DIM"],
 )
 @triton.jit
@@ -1035,9 +1136,6 @@ def fused_sdpa_forward(Q, K, V,
 
     return Q, K, V, O, M
 
-from torch.utils.dlpack import from_dlpack
-
-
 def fused_sdpa_backward(dO, 
                         Q, K, V, 
                         O, M, 
@@ -1193,7 +1291,6 @@ def _dlpack_fused_sdpa_forward(Q, K, V,
 
     return Q, K, V, O, M
 
-
 def _dlpack_fused_sdpa_backward(dO, 
                         Q, K, V, 
                         O, M, 
@@ -1293,6 +1390,8 @@ def _dlpack_fused_sdpa_backward(dO,
 if __name__ == "__main__":
     import torch
     import math
+    from torch.utils.dlpack import from_dlpack
+
 
     print("TESTING FOR ACCURACY")
 
@@ -1410,9 +1509,6 @@ if __name__ == "__main__":
         if softmax_scale is None:
             softmax_scale = 1 / (HEAD_DIM ** 0.5)
 
-        # ---------------------------
-        # Preprocess: compute D
-        # ---------------------------
         preprocess_grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE"]), BATCH_SIZE * NUM_HEADS)
         attn_backward_preprocess[preprocess_grid](
             O_ptr=O.data.ptr if not isinstance(O, torch.Tensor) else O,
@@ -1430,9 +1526,7 @@ if __name__ == "__main__":
             DTYPE_FLAG=0 if dO.dtype == cp.float32 else 1
         )
 
-        # ---------------------------
-        # Backward kernel
-        # ---------------------------
+
         grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE_MACRO"]), BATCH_SIZE * NUM_HEADS)
         _attn_bwd[grid](
             Q_ptr=Q.data.ptr if not isinstance(Q, torch.Tensor) else Q,
@@ -1477,15 +1571,12 @@ if __name__ == "__main__":
 
     @triton.testing.perf_report(configs)
     def bench_flash_attention(SEQ_LEN, mode, provider, causal, dtype, device="cuda"):
-        from torch.utils.dlpack import from_dlpack
         
         BATCH, N_HEADS, HEAD_DIM = 4, 32, 64
         sm_scale = 1.0 / math.sqrt(HEAD_DIM)
         is_fp16 = dtype=="float16"
         
-        # ---------------------------
-        # Preallocate tensors
-        # ---------------------------
+
         if provider in ["torch", "triton_torch"]:
             q = torch.randn(BATCH, N_HEADS, SEQ_LEN, HEAD_DIM, 
                             dtype=torch.float16 if is_fp16 else torch.float32,
@@ -1538,9 +1629,7 @@ if __name__ == "__main__":
             dK = cp.empty_like(k)
             dV = cp.empty_like(v)
         
-        # ---------------------------
-        # Select function
-        # ---------------------------
+
         if provider=="torch":
             if mode=="fwd":
                 fn = lambda: torch.nn.functional.scaled_dot_product_attention(q,k,v,is_causal=causal)
@@ -1557,15 +1646,10 @@ if __name__ == "__main__":
                 fn = lambda: _fused_sdpa_forward(q,k,v,O,M,causal=causal, softmax_scale=sm_scale)
             else:
                 fn = lambda: _fused_sdpa_backward(dO,q,k,v,O,M,D,dQ,dK,dV,causal=causal, softmax_scale=sm_scale)
-        
-        # ---------------------------
-        # Benchmark
-        # ---------------------------
+
         ms = triton.testing.do_bench(fn, warmup=25, rep=100)
         
-        # ---------------------------
-        # Compute TFLOPS
-        # ---------------------------
+
         flops_per_matmul = 2.0 * BATCH * N_HEADS * SEQ_LEN * SEQ_LEN * HEAD_DIM
         total_flops = 2 * flops_per_matmul
         if mode=="bwd":

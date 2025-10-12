@@ -36,16 +36,6 @@ def layernorm_naive(x, weight, bias=None, eps=1e-5):
 
     return out
 
-# def get_warps_configs():
-#     return [
-#         triton.Config({}, num_warps=nw) # {} because we have no args to pass in here
-#         for nw in [4, 8, 16]
-#     ]
-
-# @triton.autotune(
-#     configs=get_warps_configs(),
-#     key=['n_cols'],  # use embedding dim as key
-# )
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def layernorm_kernel_forward_training(
@@ -145,10 +135,7 @@ def layernorm_kernel_forward_training(
     inv_var_ptrs = inv_var_ptr + row_idx
     tl.store(inv_var_ptrs, inv_var)
 
-# @triton.autotune(
-#     configs=get_warps_configs(),
-#     key=['n_cols'],  # use embedding dim as key
-# )
+
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def layernorm_kernel_forward_inference(
@@ -221,10 +208,6 @@ def layernorm_kernel_forward_inference(
     output_ptrs = output_row_start_ptr + col_offsets
     tl.store(output_ptrs, output, mask=mask)
 
-# @triton.autotune(
-#     configs=get_warps_configs(),
-#     key=['n_cols'],  # use embedding dim as key
-# )
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def layernorm_kernel_forward_training_no_bias(
@@ -308,10 +291,7 @@ def layernorm_kernel_forward_training_no_bias(
     inv_var_ptrs = inv_var_ptr + row_idx
     tl.store(inv_var_ptrs, inv_var)
 
-# @triton.autotune(
-#     configs=get_warps_configs(),
-#     key=['n_cols'],  # use embedding dim as key
-# )
+
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def layernorm_kernel_forward_inference_no_bias(
@@ -379,10 +359,7 @@ def layernorm_kernel_forward_inference_no_bias(
     output_ptrs = output_row_start_ptr + col_offsets
     tl.store(output_ptrs, output, mask=mask)
 
-# @triton.autotune(
-#     configs=get_warps_configs(),
-#     key=['n_cols', 'n_rows'],  # use embedding dim as key
-# )
+
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"]*args["ROW_BLOCK_SIZE"])})
 @triton.jit
 def layernorm_gamma_kernel_backward(

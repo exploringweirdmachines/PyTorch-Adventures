@@ -23,17 +23,6 @@ def naive_softmax(x):
 
     return out
 
-### You can do autotuning or just provide a reasonable heuristic ###
-# def get_configs():
-#     return [
-#         triton.Config({}, num_warps=nw) # {} because we have no args to pass in here
-#         for nw in [4, 8, 16]
-#     ]
-
-# @triton.autotune(
-#     configs=get_configs(),
-#     key=['n_cols'],  # use embedding dim as key
-# )
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def softmax_kernel_forward(
@@ -310,10 +299,6 @@ def softmax_kernel_forward(
     output_ptrs = output_row_start_ptr + col_offsets
     tl.store(output_ptrs, softmax_output, mask=mask)
 
-# @triton.autotune(
-#     configs=get_configs(),
-#     key=['n_cols'],  # use embedding dim as key
-# )
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def softmax_kernel_backward(
