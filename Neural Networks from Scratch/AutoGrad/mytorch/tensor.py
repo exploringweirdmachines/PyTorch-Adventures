@@ -946,6 +946,31 @@ class Tensor:
 
         return out
     
+    def __setitem__(self, idx, value):
+        """
+        Supports slices, ints, arrays, Tensors, and tuple-of-arrays indexing.
+        Performs in-place assignment on .data.
+        Gradient is not tracked for item assignment (non-differentiable op).
+        """
+        # --- Handle Tensor index ---
+        if isinstance(idx, Tensor):
+            idx = idx.data
+
+        # --- Handle list or tuple indices (possibly containing Tensors) ---
+        if isinstance(idx, (list, tuple)):
+            idx = tuple(
+                (i.data.astype(self.xp.int64) if isinstance(i, Tensor) else self.xp.array(i, dtype=self.xp.int64))
+                if isinstance(i, (list, Tensor)) else i
+                for i in idx
+            )
+
+        # --- Handle Tensor value ---
+        if isinstance(value, Tensor):
+            value = value.data
+
+        # --- In-place assignment ---
+        self.data[idx] = value
+
     def _compare(self, other, op):
         if isinstance(other, Tensor):
             other_data = other.data
@@ -1413,14 +1438,14 @@ class Tensor:
         xp = self.xp
         device = self.device
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
-
+    
         # forward
-        out_data = xp.where(mask, value, self.data)
+        out_data = xp.where(mask.data, value, self.data)
 
         def _masked_fill_backward(out_grad):
             if self.requires_grad:
                 # Only pass gradient where mask == False
-                grad = xp.where(mask, xp.array(0, dtype=out_grad.dtype), out_grad)
+                grad = xp.where(mask.data, 0, out_grad)
 
                 if self.grad is None:
                     self.grad = grad
@@ -1525,7 +1550,7 @@ def eye(N, M=None, k=0, device="cpu", dtype=float32, requires_grad=False):
                               device=device, dtype=dtype, requires_grad=requires_grad)
 
 def tril(x, k=0, device="cpu", dtype=float32, requires_grad=False):
-    return _tensor_from_array(lambda: ap.Array.tril(x, k=k, device=device, dtype=dtype),
+    return _tensor_from_array(lambda: ap.Array.tril(x.data, k=k, device=device, dtype=dtype),
                               device=device, dtype=dtype, requires_grad=requires_grad)
 # Random arrays
 def randn(shape, device="cpu", dtype=float32, requires_grad=False):

@@ -9,6 +9,7 @@ sit on the CPU or GPU, and all numpy methods
 will work on it!
 """
 
+import warnings
 import numpy as np
 try:
     import cupy as cp
@@ -18,6 +19,7 @@ except ImportError:
     cp = None
     CUDA_AVAILABLE = False
     NUM_AVAIL_GPUS = 0
+    warnings.warn("Cupy not installed!!!")
 
 class Array:
     _binary_ufuncs = {
@@ -346,7 +348,7 @@ class Array:
         # Device info (only show if GPU)
         device_info = f", device='{self.device}'" if "cuda" in self.device else ""
 
-        # Final string with dtype always shown
+        # Final string with dtype always showsn
         return f"Array({data_str}, dtype={self.dtype}{device_info})"
 
     def __array_function__(self, func, types, args, kwargs):
@@ -432,7 +434,6 @@ class Array:
                 arrays.append(x)
                 if isinstance(x, np.ndarray):
                     devices.add("cpu")
-                    print(x)
                 elif CUDA_AVAILABLE and isinstance(x, cp.ndarray):
                     devices.add(f"cuda:{x.device.id}")
     
@@ -644,71 +645,72 @@ for dunder, ufunc in Array._unary_ufuncs.items():
 for dunder, ufunc in Array._inplace_ops.items():
     setattr(Array, dunder, Array._make_inplace_op(ufunc))
 
-# def test_array_operations():
-#     # --- CPU arrays ---
-#     a_cpu = Array([1,2,3], device="cpu")
-#     b_cpu = Array([4,5,6], device="cpu")
 
-#     # Binary operations (add, sub, mul)
-#     assert np.allclose((a_cpu + b_cpu).asnumpy(), np.array([5,7,9]))
-#     assert np.allclose((b_cpu - a_cpu).asnumpy(), np.array([3,3,3]))
-#     assert np.allclose((a_cpu * b_cpu).asnumpy(), np.array([4,10,18]))
+if __name__ == "__main__":
+    def test_array_operations():
+        # --- CPU arrays ---
+        a_cpu = Array([1,2,3], device="cpu")
+        b_cpu = Array([4,5,6], device="cpu")
 
-#     # Unary operations
-#     assert np.allclose((-a_cpu).asnumpy(), np.array([-1,-2,-3]))
-#     assert np.allclose((+b_cpu).asnumpy(), np.array([4,5,6]))
-#     assert np.allclose(abs(Array([-1,-2,-3])).asnumpy(), np.array([1,2,3]))
+        # Binary operations (add, sub, mul)
+        assert np.allclose((a_cpu + b_cpu).asnumpy(), np.array([5,7,9]))
+        assert np.allclose((b_cpu - a_cpu).asnumpy(), np.array([3,3,3]))
+        assert np.allclose((a_cpu * b_cpu).asnumpy(), np.array([4,10,18]))
 
-#     # Inplace operations
-#     a_copy = Array([1,2,3])
-#     a_copy += Array([10,20,30])
-#     assert np.allclose(a_copy.asnumpy(), np.array([11,22,33]))
+        # Unary operations
+        assert np.allclose((-a_cpu).asnumpy(), np.array([-1,-2,-3]))
+        assert np.allclose((+b_cpu).asnumpy(), np.array([4,5,6]))
+        assert np.allclose(abs(Array([-1,-2,-3])).asnumpy(), np.array([1,2,3]))
 
-#     # --- GPU arrays ---
-#     if CUDA_AVAILABLE:
-#         a_gpu = Array([1,2,3], device="cuda:0")
-#         b_gpu = Array([4,5,6], device="cuda:0")
+        # Inplace operations
+        a_copy = Array([1,2,3])
+        a_copy += Array([10,20,30])
+        assert np.allclose(a_copy.asnumpy(), np.array([11,22,33]))
 
-#         # Binary ops
-#         assert np.allclose((a_gpu + b_gpu).asnumpy(), np.array([5,7,9]))
-#         assert np.allclose((b_gpu - a_gpu).asnumpy(), np.array([3,3,3]))
-#         assert np.allclose((a_gpu * b_gpu).asnumpy(), np.array([4,10,18]))
+        # --- GPU arrays ---
+        if CUDA_AVAILABLE:
+            a_gpu = Array([1,2,3], device="cuda:0")
+            b_gpu = Array([4,5,6], device="cuda:0")
 
-#         # Unary ops
-#         assert np.allclose((-a_gpu).asnumpy(), np.array([-1,-2,-3]))
-#         assert np.allclose((+b_gpu).asnumpy(), np.array([4,5,6]))
+            # Binary ops
+            assert np.allclose((a_gpu + b_gpu).asnumpy(), np.array([5,7,9]))
+            assert np.allclose((b_gpu - a_gpu).asnumpy(), np.array([3,3,3]))
+            assert np.allclose((a_gpu * b_gpu).asnumpy(), np.array([4,10,18]))
 
-#         # Inplace ops
-#         a_copy_gpu = Array([1,2,3], device="cuda:0")
-#         a_copy_gpu *= Array([10,20,30], device="cuda:0")
-#         assert np.allclose(a_copy_gpu.asnumpy(), np.array([10,40,90]))
+            # Unary ops
+            assert np.allclose((-a_gpu).asnumpy(), np.array([-1,-2,-3]))
+            assert np.allclose((+b_gpu).asnumpy(), np.array([4,5,6]))
 
-#         # Device mismatch errors
-#         try:
-#             _ = a_cpu + a_gpu
-#         except RuntimeError as e:
-#             assert "device" in str(e)
+            # Inplace ops
+            a_copy_gpu = Array([1,2,3], device="cuda:0")
+            a_copy_gpu *= Array([10,20,30], device="cuda:0")
+            assert np.allclose(a_copy_gpu.asnumpy(), np.array([10,40,90]))
 
-#         try:
-#             _ = np.add(a_cpu, a_gpu)
-#         except RuntimeError as e:
-#             assert "device" in str(e)
+            # Device mismatch errors
+            try:
+                _ = a_cpu + a_gpu
+            except RuntimeError as e:
+                assert "device" in str(e)
 
-#         # Using .xp backend
-#         assert np.allclose(np.add(a_gpu, a_gpu).asnumpy(), np.array([2,4,6]))
+            try:
+                _ = np.add(a_cpu, a_gpu)
+            except RuntimeError as e:
+                assert "device" in str(e)
 
-#     # Factory functions
-#     z = Array.zeros((2,2), device="cpu")
-#     assert np.allclose(z.asnumpy(), np.zeros((2,2)))
+            # Using .xp backend
+            assert np.allclose(np.add(a_gpu, a_gpu).asnumpy(), np.array([2,4,6]))
 
-#     o = Array.ones((2,2), device="cpu")
-#     assert np.allclose(o.asnumpy(), np.ones((2,2)))
+        # Factory functions
+        z = Array.zeros((2,2), device="cpu")
+        assert np.allclose(z.asnumpy(), np.zeros((2,2)))
 
-#     r = Array.arange(3, device="cpu")
-#     assert np.allclose(r.asnumpy(), np.array([0,1,2]))
+        o = Array.ones((2,2), device="cpu")
+        assert np.allclose(o.asnumpy(), np.ones((2,2)))
 
-#     print("All CPU/GPU tests passed!")
+        r = Array.arange(3, device="cpu")
+        assert np.allclose(r.asnumpy(), np.array([0,1,2]))
 
-# if __name__ == "__main__":
+        print("All CPU/GPU tests passed!")
 
-#     test_array_operations()
+   
+    test_array_operations()

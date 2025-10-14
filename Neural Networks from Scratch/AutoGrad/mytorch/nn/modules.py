@@ -67,6 +67,7 @@ class Module:
             yield from module.parameters(memo)
 
     def named_parameters(self, prefix="", memo=None):
+
         if memo is None:
             memo = set()
 
@@ -85,6 +86,35 @@ class Module:
         for name, m in self._modules.items():
             sub_prefix = f"{prefix}{name}." if prefix else f"{name}."
             yield from m.named_parameters(sub_prefix, memo)
+
+    def register_buffer(self, name, tensor):
+        if not isinstance(tensor, Tensor):
+            raise TypeError("Buffers must be Tensors")
+        self._buffers[name] = tensor
+        object.__setattr__(self, name, tensor)
+
+    def named_buffers(self, prefix="", memo=None):
+
+        if memo is None:
+            memo = set()
+        
+        for name, buf in self._buffers.items():
+            if buf is not None:
+                # Use same deduplication logic as parameters
+                if "cuda" in buf.device:
+                    ptr = buf.data.data.ptr
+                else:
+                    ptr = id(buf.data)
+                
+                if ptr not in memo:
+                    memo.add(ptr)
+                    full = f"{prefix}{name}" if prefix else name
+                    yield full, buf
+        
+        # Recursively get buffers from submodules
+        for name, m in self._modules.items():
+            sub_prefix = f"{prefix}{name}." if prefix else f"{name}."
+            yield from m.named_buffers(sub_prefix, memo)
 
     def to(self, device):
         """
@@ -107,12 +137,6 @@ class Module:
             m.to(device)
 
         return self
-
-    def register_buffer(self, name, tensor):
-        if not isinstance(tensor, Tensor):
-            raise TypeError("Buffers must be Tensors")
-        self._buffers[name] = tensor
-        object.__setattr__(self, name, tensor)
 
     def apply(self, fn):
         
@@ -147,23 +171,25 @@ class Module:
 
     def state_dict(self):
         """
-        Returns a dictionary of all parameters as NumPy arrays (CPU-friendly).
+        Returns a dictionary of all parameters and buffers as NumPy arrays
         """
         state = {}
-
-        for name, param  in self.named_parameters():
+        
+        # Save all parameters recursively
+        for name, param in self.named_parameters():
             if "cuda" in param.device:
                 state[name] = cp.asnumpy(param.data)
             else:
                 state[name] = param.data
-
-        for name, buf in self._buffers.items():
+        
+        # Save all buffers recursively
+        for name, buf in self.named_buffers():
             if buf is not None:
                 if "cuda" in buf.device:
                     state[name] = cp.asnumpy(buf.data)
                 else:
                     state[name] = buf.data
-
+        
         return state
     
     def load_state_dict(self, state_dict, strict=True, device="cpu"):
@@ -177,32 +203,32 @@ class Module:
         """
         missing_keys = []
         unexpected_keys = list(state_dict.keys())
-
-        # Utility to move arrays to correct backend ###
-        ### Default to float32 here ###
+        
+        # Utility to move arrays to correct backend
+        # Default to float32 here
         def to_device(array):
             if device == "cuda":
                 return cp.asarray(array, dtype=cp.float32)
             else:
                 return array.astype(np.float32)
-
-        # Load parameters
+        
+        # Load parameters recursively
         for name, param in self.named_parameters():
             if name in state_dict:
                 param.data[:] = to_device(state_dict[name])
                 unexpected_keys.remove(name)
             else:
                 missing_keys.append(name)
-
-        # Load buffers
-        for name, buf in self._buffers.items():
+        
+        # Load buffers recursively
+        for name, buf in self.named_buffers():
             if name in state_dict:
                 buf.data[:] = to_device(state_dict[name])
                 if name in unexpected_keys:
                     unexpected_keys.remove(name)
             else:
                 missing_keys.append(name)
-
+        
         if strict:
             error_msgs = []
             if missing_keys:
