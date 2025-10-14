@@ -178,17 +178,17 @@ class Module:
         # Save all parameters recursively
         for name, param in self.named_parameters():
             if "cuda" in param.device:
-                state[name] = cp.asnumpy(param.data)
+                state[name] = param.numpy()
             else:
-                state[name] = param.data
+                state[name] = param.numpy()
         
         # Save all buffers recursively
         for name, buf in self.named_buffers():
             if buf is not None:
                 if "cuda" in buf.device:
-                    state[name] = cp.asnumpy(buf.data)
+                    state[name] = buf.numpy()
                 else:
-                    state[name] = buf.data
+                    state[name] = buf.numpy()
         
         return state
     
