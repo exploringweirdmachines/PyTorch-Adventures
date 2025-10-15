@@ -49,6 +49,12 @@ class Module:
         return object.__setattr__(self, name, value)
 
     def parameters(self, memo=None):
+
+        """
+        Returns a generator of parameters and only returns unique tensors. 
+        Referenced tensors (like in weight tying) are not included here!
+        """
+
         if memo is None:
             memo = set()
 
@@ -65,6 +71,14 @@ class Module:
 
         for module in self._modules.values():
             yield from module.parameters(memo)
+
+    def _parameters_no_dedup(self, prefix=""):
+        """Yield all parameters including duplicates"""
+        for param in self._parameters.values():
+            yield param
+
+        for module in self._modules.values():
+            yield from module.parameters()
 
     def named_parameters(self, prefix="", memo=None):
 
@@ -87,6 +101,15 @@ class Module:
             sub_prefix = f"{prefix}{name}." if prefix else f"{name}."
             yield from m.named_parameters(sub_prefix, memo)
 
+    def _named_parameters_no_dedup(self, prefix=""):
+        """Yield all parameters with names, including duplicates"""
+        for name, param in self._parameters.items():
+            full_name = f"{prefix}{name}" if prefix else name
+            yield full_name, param
+        for name, module in self._modules.items():
+            sub_prefix = f"{prefix}{name}." if prefix else f"{name}."
+            yield from module._named_parameters_no_dedup(sub_prefix)
+            
     def register_buffer(self, name, tensor):
         if not isinstance(tensor, Tensor):
             raise TypeError("Buffers must be Tensors")
@@ -115,6 +138,15 @@ class Module:
         for name, m in self._modules.items():
             sub_prefix = f"{prefix}{name}." if prefix else f"{name}."
             yield from m.named_buffers(sub_prefix, memo)
+    
+    def _named_buffers_no_dedup(self, prefix=""):
+        """Yield all buffers with names, including duplicates"""
+        for name, param in self._buffers.items():
+            full_name = f"{prefix}{name}" if prefix else name
+            yield full_name, param
+        for name, module in self._modules.items():
+            sub_prefix = f"{prefix}{name}." if prefix else f"{name}."
+            yield from module._named_parameters_no_dedup(sub_prefix)
 
     def to(self, device):
         """
@@ -176,14 +208,14 @@ class Module:
         state = {}
         
         # Save all parameters recursively
-        for name, param in self.named_parameters():
+        for name, param in self._named_parameters_no_dedup():
             if "cuda" in param.device:
                 state[name] = param.numpy()
             else:
                 state[name] = param.numpy()
         
         # Save all buffers recursively
-        for name, buf in self.named_buffers():
+        for name, buf in self._named_buffers_no_dedup():
             if buf is not None:
                 if "cuda" in buf.device:
                     state[name] = buf.numpy()
@@ -213,7 +245,7 @@ class Module:
                 return array.astype(np.float32)
         
         # Load parameters recursively
-        for name, param in self.named_parameters():
+        for name, param in self._named_parameters_no_dedup():
             if name in state_dict:
                 param.data[:] = to_device(state_dict[name])
                 unexpected_keys.remove(name)
@@ -221,7 +253,7 @@ class Module:
                 missing_keys.append(name)
         
         # Load buffers recursively
-        for name, buf in self.named_buffers():
+        for name, buf in self._named_buffers_no_dedup():
             if name in state_dict:
                 buf.data[:] = to_device(state_dict[name])
                 if name in unexpected_keys:

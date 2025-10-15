@@ -1952,6 +1952,8 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
     logits: (* x num_classes)
     targets (*, )
     ignore_index: If a label is -100 it wont contribute to the loss
+
+    For precision, we will compute the loss at fp32 and then cast back to fp16 if needed!
     """
 
     ### Flatten Logits to be (*, num_classes) ###
@@ -2011,11 +2013,10 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
             # So lets just write a kernel that processes one row at a time. We will grab the 
             # NUM_CLASSES length vector of logits and the single label 
             
-            logits_data = logits.data.reshape(flattened_dim, num_classes)
+            logits_data = logits.data.reshape(flattened_dim, num_classes).astype("float32")
             targets_data = targets.data.reshape(flattened_dim)
 
-            logits_data = logits.xp.ascontiguousarray(logits_data, dtype=logits.dtype)
-
+            # logits_data = logits.xp.ascontiguousarray(logits_data, dtype=logits.dtype)
             mask = (targets_data != ignore_index)
             valid_counts = mask.sum()
 
@@ -2028,8 +2029,12 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
             nll = (logsumexp.flatten() - logits_data[np.arange(flattened_dim), targets_data]) * mask
             loss_value = np.sum(nll) / valid_counts
 
+            loss_value = loss_value.astype(logits.dtype)
+            
             def _cross_entropy_backward(grad_output):
+
                 if logits.requires_grad:
+                
                     # Compute softmax probabilities for all rows
                     softmax = exp_shifted / np.sum(exp_shifted, axis=1, keepdims=True)  # shape (B, C)
                     
@@ -2043,8 +2048,8 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
                     # Zero out ignored rows
                     grad_input *= mask.reshape(-1,1)
 
-                    # Reshape back to original logits shape
-                    grad_input = grad_input.reshape(logits.shape)
+                    # Reshape back to original logits shape and dtype
+                    grad_input = grad_input.reshape(logits.shape).astype(logits.dtype)
 
                     if logits.grad is None:
                         logits.grad = grad_input
@@ -2055,18 +2060,21 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
             
             ### Fused Op only happens in float32 ###
             logits_data = logits.data.reshape(flattened_dim, num_classes).astype("float32")
-            targets_data = targets.data.reshape(flattened_dim).astype("int64")
+            targets_data = targets.data.reshape(flattened_dim).astype("int32")
 
             targets_flat = targets_data
             mask = (targets_flat != ignore_index)
             valid_count = mask.sum()
-
+            
             # Triton kernel forward
             loss_cp, logsumexp_cp = FO.fused_cross_entropy_forward(logits_data, targets_data)
+            
             loss_value = loss_cp.sum() / valid_count
 
-            def _cross_entropy_backward(grad_output):
+            loss_value = loss_value.astype(logits.dtype)
 
+            def _cross_entropy_backward(grad_output):
+      
                 ### The loss is the last thing in our model ###
                 ### so our upstream grad is just a bunch of ones so nothing ###
                 ### to really use here! ###
@@ -2075,10 +2083,13 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
                         logits_data,
                         targets_data,
                         logsumexp_cp
-                    )
-                    # Reshape back to original logits shape
+                    ) 
+
+                    grad_cp *= grad_output 
+
+                    # Reshape back to original logits shape and dtype
                     grad_input = grad_cp.reshape(*logits.shape).astype(logits.dtype)
- 
+
                     if logits.grad is None:
                         logits.grad = grad_input
                     else:
@@ -2092,7 +2103,7 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
             grad_fn=_cross_entropy_backward if requires_grad else None,
             grad_fn_name="<CrossEntropyBackward>" if requires_grad else None
         )
-
+        
         if requires_grad:
             out._add_parents(logits)
 
