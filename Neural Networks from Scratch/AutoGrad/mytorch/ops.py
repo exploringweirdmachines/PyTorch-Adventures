@@ -28,7 +28,7 @@ def var(input, dim=None, keepdims=False):
 def max(input, dim=None, keepdims=False):
     return input.max(dim, keepdims)
 
-def argmax(input, dim=None, keepdims=False):
+def argmax(input, dim=None):
     return input.argmax(dim)
 
 def masked_fill(input, mask, value):
@@ -107,7 +107,7 @@ def concatenate(tensors, dim=0):
     requires_grad = any(t.requires_grad for t in tensors) and Tensor.build_graph_enabled()
 
     tensor_list = [t.data for t in tensors]
-    out_data = xp.concatenate(tensor_list, dim=dim)
+    out_data = xp.concatenate(tensor_list, axis=dim)
 
     ### For backward pass we need the sizes along the concat dim ###
     sizes = [t.shape[dim] for t in tensors]
