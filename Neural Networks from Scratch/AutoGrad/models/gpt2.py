@@ -108,13 +108,13 @@ class Attention(nn.Module):
             # Compute attention scores
             scores = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
      
-            scores = scores + self.causal_mask[:, :, :seq_len, :seq_len].astype(scores.data.dtype)
+            masked_scores = scores + self.causal_mask[:, :, :seq_len, :seq_len].astype(scores.data.dtype)
 
-            attention = self.softmax(scores, dim=-1)
-            attention = self.attn_drop(attention)
+            softmax_attention = self.softmax(masked_scores, dim=-1)
+            dropped_attention = self.attn_drop(softmax_attention)
 
             # Attention output
-            output = attention @ v
+            output = dropped_attention @ v
 
         else:
    
@@ -229,6 +229,9 @@ class GPT2(nn.Module):
             if "out_proj" in name:
                 mytorch.nn.init.normal_(param, mean=0.0, std=(0.02/np.sqrt(2 * config.num_blocks)))
 
+        ### Weight tying ###
+        self.lm_head.weight = self.embeddings.char_embeddings.weight
+
     def forward(self, x):
 
         x = self.embeddings(x)
@@ -238,7 +241,7 @@ class GPT2(nn.Module):
 
         x = self.final_layer_norm(x)    
         x = self.lm_head(x)
-
+        
         return x
     
 ### Standard Weight Init for Transformers ###
