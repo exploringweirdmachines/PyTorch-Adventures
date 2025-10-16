@@ -2060,16 +2060,18 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
             
             ### Fused Op only happens in float32 ###
             logits_data = logits.data.reshape(flattened_dim, num_classes).astype("float32")
-            targets_data = targets.data.reshape(flattened_dim).astype("int32")
+
+            ### Triton kernel expects long tensors (int64) labels ###
+            targets_data = targets.data.reshape(flattened_dim).astype("int64")
 
             targets_flat = targets_data
             mask = (targets_flat != ignore_index)
-            valid_count = mask.sum()
+            valid_counts = mask.sum()
             
             # Triton kernel forward
             loss_cp, logsumexp_cp = FO.fused_cross_entropy_forward(logits_data, targets_data)
-            
-            loss_value = loss_cp.sum() / valid_count
+
+            loss_value = loss_cp.sum() / valid_counts
 
             loss_value = loss_value.astype(logits.dtype)
 
@@ -2085,7 +2087,7 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
                         logsumexp_cp
                     ) 
 
-                    grad_cp *= grad_output 
+                    grad_cp *= (grad_output / valid_counts) 
 
                     # Reshape back to original logits shape and dtype
                     grad_input = grad_cp.reshape(*logits.shape).astype(logits.dtype)
