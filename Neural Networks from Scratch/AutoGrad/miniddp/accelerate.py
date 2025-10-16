@@ -104,8 +104,7 @@ class GradScaler:
         self._grads_unscaled = False
 
 class Accelerator:
-    def __init__(self, 
-                 project_dir=None,
+    def __init__(self,
                  num_gpus=None, 
                  rank=None, 
                  master_addr="127.0.0.1", 
@@ -113,9 +112,6 @@ class Accelerator:
                  gradient_accumulation_steps=1,
                  mixed_precision=False):
         
-        ### Create project directory ###
-        os.makedirs(project_dir, exist_ok=True)
-
         ### Set Number of GPUs if not provided from environment ###
         self.rank = rank if rank is not None else int(os.environ.get("RANK", 0))
         self.world_size = num_gpus if num_gpus is not None else int(os.environ.get("WORLD_SIZE", 1))
