@@ -1512,6 +1512,7 @@ class Tensor:
         return out
     
     def sort(self, dim=-1, descending=False):
+        
         device = self.device
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         
@@ -1543,6 +1544,7 @@ class Tensor:
         
         # Return values and indices (wrapped in Tensor for indices)
         indices_tensor = Tensor(sorted_indices, requires_grad=False, device=device, dtype=int32)
+
         return out, indices_tensor
 
     def argsort(self, dim=-1, descending=False):
@@ -1569,7 +1571,6 @@ class Tensor:
             out._add_parents(self)
 
         return out
-
 
     def _add_parents(self, *parents):
         """
