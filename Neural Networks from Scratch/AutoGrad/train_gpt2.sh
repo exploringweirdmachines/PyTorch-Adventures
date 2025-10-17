@@ -71,7 +71,8 @@ case "$TARGET" in
             --beta1 0.9 \
             --beta2 0.95 \
             --mixed_precision \
-            --log_iter 25
+            --log_iter 25 \
+            --log_wandb
         ;;
     shakespeare)
         echo "Starting Shakespeare training..."

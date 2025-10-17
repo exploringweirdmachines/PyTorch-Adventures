@@ -18,15 +18,15 @@ def main(args):
         def __init__(self):
             super().__init__()
 
-            self.fc1 = nn.Linear(784, 512, auto=False)
+            self.fc1 = nn.Linear(784, 512)
             self.drop1 = nn.Dropout(0.1)
-            self.fc2 = nn.Linear(512, 256, auto=False)
+            self.fc2 = nn.Linear(512, 256)
             self.drop2 = nn.Dropout(0.1)
-            self.fc3 = nn.Linear(256, 128, auto=False)
+            self.fc3 = nn.Linear(256, 128)
             self.drop3 = nn.Dropout(0.1)
-            self.fc4 = nn.Linear(128, 10, auto=False)
+            self.fc4 = nn.Linear(128, 10)
 
-            self.activation = nn.ReLU(auto=False)
+            self.activation = nn.ReLU()
 
         def forward(self, x):
 
@@ -38,6 +38,7 @@ def main(args):
             return x
         
     model = MyTorchMNIST()
+    model = model.to("cuda")
     print(model)
 
     ### Prep Dataset ###
@@ -64,7 +65,7 @@ def main(args):
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     ### Prep Loss Function ###
-    loss_fn = nn.CrossEntropyLoss(auto=False)
+    loss_fn = nn.CrossEntropyLoss()
 
     ### Train Model for 10 Epochs ###
     for epoch in range(args.epochs):
@@ -76,6 +77,9 @@ def main(args):
 
         model.train()
         for images, labels in tqdm(trainloader):
+            
+            ### Set on correct device ###
+            images, labels = images.to("cuda"), labels.to("cuda")
 
             ### Pass Through Model ###
             pred = model(images)
@@ -99,6 +103,9 @@ def main(args):
 
         model.eval()
         for images, labels in tqdm(testloader):
+            
+            ### Set on correct device ###
+            images, labels = images.to("cuda"), labels.to("cuda")
 
             with mytorch.no_grad():
                 ### Pass Through Model ###

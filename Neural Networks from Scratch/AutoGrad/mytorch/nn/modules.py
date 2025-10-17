@@ -270,7 +270,12 @@ class Module:
             if error_msgs:
                 raise RuntimeError("Error(s) in loading state_dict:\n" + "\n".join(error_msgs))
             else:
-                print("<All Keys Matched Successfully>")
+                return "<All Keys Matched Successfully>"
+        else:
+            if len(missing_keys) == 0 and len(unexpected_keys) == 0:
+                return "<All Keys Matched Successfully>"
+            else:
+                return missing_keys, unexpected_keys
 
     def train(self):
         self.training = True

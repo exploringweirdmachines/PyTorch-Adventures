@@ -87,7 +87,7 @@ class Attention(nn.Module):
             causal_mask = mytorch.masked_fill(mytorch.zeros((1,1,context_length, context_length)), causal_positions, value=float("-inf"))  
             self.register_buffer("causal_mask", causal_mask)
 
-    def forward(self, x, attention_mask=None):
+    def forward(self, x):
   
         batch, seq_len, embed_dim = x.shape
 
