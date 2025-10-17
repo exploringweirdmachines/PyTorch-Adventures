@@ -19,6 +19,9 @@ def log(input):
 def sum(input, dim=None, keepdims=False):
     return input.sum(dim, keepdims)
 
+def cumsum(input, dim=None):
+    return input.cumsum(dim)
+
 def mean(input, dim=None, keepdims=False):
     return input.mean(dim, keepdims)
 

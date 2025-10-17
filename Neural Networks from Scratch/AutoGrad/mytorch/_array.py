@@ -436,7 +436,7 @@ class Array:
                     devices.add("cpu")
                 elif CUDA_AVAILABLE and isinstance(x, cp.ndarray):
                     devices.add(f"cuda:{x.device.id}")
-    
+     
         # Enforce single-device rule
         if len(devices) > 1:
             raise RuntimeError(f"All inputs must be on the same device, found: {devices}")
@@ -470,7 +470,7 @@ class Array:
             return index
         
         idx = _coerce_index(idx)
-      
+    
         if self.xp == np:
             result = self._array[idx]
         else:
@@ -491,10 +491,10 @@ class Array:
         explicitly define!
         """
         if hasattr(self._array, name):
-            return getattr(self._array, name)
+            attr = getattr(self._array, name)
+            return attr
         raise AttributeError(f"'Array' object has no attribute '{name}'")
-        
-
+    
     @classmethod
     def _wrap_factory(cls, xp_func, *args, device="cpu", dtype="float32", **kwargs):
         """
@@ -566,7 +566,7 @@ class Array:
         tgt_device_idx = None
         
         if "cuda" in device:
-            _, tgt_device_idx = cls.__parse_cuda_str(device)
+           _, tgt_device_idx = cls(None).__parse_cuda_str(device)
         
         # Generate array on the correct device
         if xp is cp:
@@ -583,7 +583,7 @@ class Array:
         tgt_device_idx = None
 
         if "cuda" in device:
-            _, tgt_device_idx = cls.__parse_cuda_str(device)
+            _, tgt_device_idx = cls(None).__parse_cuda_str(device)
 
         # Generate array on the correct device
         if xp is cp:
@@ -623,6 +623,12 @@ class Array:
         return cls._wrap_factory("empty_like", other, device=device, dtype=dtype)
     
     @classmethod
+    def full_like(cls, other, fill_value, device=None, dtype=None):
+        device = device or other.device
+        dtype = dtype or str(other.dtype)
+        return cls._wrap_factory("full_like", other, fill_value, device=device, dtype=dtype)
+    
+    @classmethod
     def randn_like(cls, other, device=None, dtype=None):
         device = device or other.device
         dtype = dtype or str(other.dtype)
@@ -633,7 +639,7 @@ class Array:
         device = device or other.device
         dtype = dtype or str(other.dtype)
         return cls.rand(other.shape, device=device, dtype=dtype)
-
+    
 # Attach binary, unary, and inplace operations
 for dunder, ufunc in Array._binary_ufuncs.items():
     reflect = dunder.startswith("__r")
